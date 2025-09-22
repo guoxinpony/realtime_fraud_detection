@@ -295,6 +295,19 @@ services:
       - realtime-fraud-detection
 
 
+  producer:
+    build: ./producer
+    env_file: .env
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+    networks:
+      - realtime-fraud-detection
+
+
 
 
 volumes:
