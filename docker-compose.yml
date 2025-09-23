@@ -1,4 +1,4 @@
-x-airflow-common: &airflow-common
+﻿x-airflow-common: &airflow-common
   image: airflow_realtime_fraud:2.10.5
   environment: &airflow-common-env
     # AIRFLOW__CORE__EXECUTOR: LocalExecutor
@@ -55,6 +55,10 @@ services:
       interval: 10s
       retries: 5
       start_period: 5s
+    command:
+      - "--file"
+      - "/data/fraud_detection_data.csv"
+      - realtime-fraud-detection
     networks:
       - realtime-fraud-detection
 
@@ -299,15 +303,18 @@ services:
     build: ./producer
     env_file: .env
     deploy:
-      replicas: 2
+      replicas: 1
       resources:
         limits:
           cpus: '1'
           memory: 1G
+    volumes:
+      - ./data:/data
+    command:
+      - "--file"
+      - "/data/fraud_detection_data.csv"
     networks:
       - realtime-fraud-detection
-
-
 
 
 volumes:

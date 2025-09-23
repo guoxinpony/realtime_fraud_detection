@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import csv
 import json
 import logging
@@ -183,12 +183,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Send real transactions to Kafka")
     parser.add_argument(
         "--file",
-        default="../data/fraudTrain.csv",
-        help="CSV file with training transactions",
+        default="../data/fraud_detection_data.csv",
+        help="CSV file with transactions (defaults to merged dataset)",
     )
     parser.add_argument(
         "--topic",
-        default=os.getenv("KAFKA_TOPIC", "transactions"),
+        default=os.getenv("KAFKA_TOPIC", "transactions"), # set KAFKA_TOPIC in .env in project root directory
         help="Kafka topic to publish to",
     )
     parser.add_argument(
