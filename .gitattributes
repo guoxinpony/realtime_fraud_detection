@@ -1,0 +1,5 @@
+# By default, all text files in the repository use LF.
+* text=auto eol=lf
+
+# .sh scripts must keep LF (to avoid /bin/bash^M errors)
+*.sh text eol=lf
