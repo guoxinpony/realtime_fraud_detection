@@ -22,9 +22,9 @@ def _train_model(**context):
     try:
         logger.info('Initializing fraud detection training')
         trainer = FraudDetectionTraining()
-        # model, precision = trainer.train_model()
+        model, precision = trainer.train_model()
 
-        return { 'status': 'success' }
+        # return { 'status': 'success' }
 
         return { 'status': 'success', 'precision': precision }
     

@@ -13,6 +13,7 @@ kafka:
   topic: "transactions"
   output_topic: "fraud_predictions"
   security_protocol: 'SASL_SSL'
+  timeout: 12000
 
 
 model:

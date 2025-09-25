@@ -17,8 +17,9 @@ from kafka import KafkaConsumer
 from mlflow.models import infer_signature
 from numpy.array_api import astype
 from sklearn.compose import ColumnTransformer
-from sklearn.metrics import make_scorer, fbeta_score, precision_recall_curve, average_precision_score, precision_score, \
-    recall_score, f1_score, confusion_matrix
+from sklearn.metrics import make_scorer, fbeta_score, precision_recall_curve, \
+                            average_precision_score, precision_score, \
+                            recall_score, f1_score, confusion_matrix
 from sklearn.model_selection import train_test_split, RandomizedSearchCV, StratifiedKFold
 from sklearn.preprocessing import OrdinalEncoder
 from xgboost import XGBClassifier
@@ -150,6 +151,81 @@ class FraudDetectionTraining:
                 logger.info('Created missing MLFlow bucket: %s', mlflow_bucket)
         except Exception as e:
             logger.error('Minio connection failed: %s', str(e))
+
+
+    def read_from_kafka(self) -> pd.DataFrame:
+        """
+        Secure Kafka consumer implementation with enterprise features:
+
+        - SASL/SSL authentication
+        - Auto-offset reset for recovery scenarios
+        - Data quality checks:
+          - Schema validation
+          - Fraud label existence
+          - Fraud rate monitoring
+
+        Implements graceful shutdown on timeout/error conditions.
+        """
+        try:
+
+            # read topic name from config
+            topic = self.config['kafka']['topic']
+            logger.info('Connecting to kafka topic %s', topic)
+
+            # read configs 
+            # build connection to kafka server and read all data into python env
+            consumer = KafkaConsumer(
+                topic,
+                bootstrap_servers=self.config['kafka']['bootstrap_servers'].split(','),
+                security_protocol='SASL_SSL',
+                sasl_mechanism='PLAIN',
+                sasl_plain_username=self.config['kafka']['username'],
+                sasl_plain_password=self.config['kafka']['password'],
+                value_deserializer=lambda x: json.loads(x.decode('utf-8')),
+                auto_offset_reset='earliest',
+                consumer_timeout_ms=self.config['kafka'].get('timeout', 10000)
+            )
+
+            # load and format messages into DataFrame
+
+            messages = [msg.value for msg in consumer]
+            consumer.close()
+            df = pd.DataFrame(messages)
+
+
+            # data quality check: is empty dataframe
+            if df.empty:
+                raise ValueError('No messages received from Kafka.')
+
+            # Temporal data standardization
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+
+            # data quality check: fraud label is included in the data?
+            if 'is_fraud' not in df.columns:
+                raise ValueError('Fraud label (is_fraud) missing from Kafka data')
+
+            # calculate percentage of fraud
+            fraud_rate = df['is_fraud'].mean() * 100
+            logger.info('Kafka data read successfully with fraud rate: %.2f%%', fraud_rate)
+
+            return df
+        except Exception as e:
+            logger.error('Failed to read data from Kafka: %s', str(e), exc_info=True)
+            raise
+
+
+
+    def train_model(self):
+        
+        try:
+            logger.info('Starting model training')
+
+            # read data from kafka server
+            df = self.read_from_kafka()
+            
+        except Exception as e:
+            logger.error('Training failed: %s', str(e), exc_info=True)
+            raise e
 
 
     
