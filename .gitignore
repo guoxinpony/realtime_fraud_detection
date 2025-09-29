@@ -4,3 +4,5 @@ logs
 *.csv
 
 *.pyc
+
+*.pkl
