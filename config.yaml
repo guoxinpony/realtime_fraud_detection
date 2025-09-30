@@ -27,7 +27,7 @@ model:
     colsample_bytree: 0.8
     scale_pos_weight: 1
     tree_method: "hist"
-  path: "/app/models/fraud_detection_model.pkl"
+  path: "/app/models/fraud_detection_model_TEST.pkl"
 
 
 spark:
