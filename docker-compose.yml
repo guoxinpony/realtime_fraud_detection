@@ -316,6 +316,16 @@ services:
     networks:
       - realtime-fraud-detection
 
+  inference:
+    build: ./inference
+    env_file: .env
+    volumes:
+      - ./models:/app/models
+      - ./config.yaml:/app/config.yaml
+      - ./env:/app/.env
+    networks:
+      - realtime-fraud-detection
+
 
 volumes:
   postgres-db-volume:
