@@ -55,10 +55,6 @@ services:
       interval: 10s
       retries: 5
       start_period: 5s
-    command:
-      - "--file"
-      - "/data/fraud_detection_data.csv"
-      - realtime-fraud-detection
     networks:
       - realtime-fraud-detection
 
@@ -146,8 +142,8 @@ services:
   flower:
     <<: *airflow-common
     command: celery flower
-    profiles:
-      - flower
+    # profiles:
+    #   - flower
     ports:
       - "5555:5555"
     healthcheck:
@@ -299,22 +295,22 @@ services:
       - realtime-fraud-detection
 
 
-  producer:
-    build: ./producer
-    env_file: .env
-    deploy:
-      replicas: 1
-      resources:
-        limits:
-          cpus: '1'
-          memory: 1G
-    volumes:
-      - ./data:/data
-    command:
-      - "--file"
-      - "/data/fraud_detection_data.csv"
-    networks:
-      - realtime-fraud-detection
+  # producer:
+  #   build: ./producer
+  #   env_file: .env
+  #   deploy:
+  #     replicas: 1
+  #     resources:
+  #       limits:
+  #         cpus: '1'
+  #         memory: 1G
+  #   volumes:
+  #     - ./data:/data
+  #   command:
+  #     - "--file"
+  #     - "/data/fraud_detection_data.csv"
+  #   networks:
+  #     - realtime-fraud-detection
 
   inference:
     build: ./inference
