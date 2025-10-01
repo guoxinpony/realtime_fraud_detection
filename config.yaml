@@ -7,12 +7,12 @@ mlflow:
   bucket: "mlflow"
 
 kafka:
-  bootstrap_servers: "pkc-619z3.us-east1.gcp.confluent.cloud:9092"
-  username: "FWNDEFYYI5D4RII2"
-  password: "cfltk4VkQCqAu/toxD5DYuapfzkth71nFFNADK+taynZkdrZRDgZ/2oiwM8WZcog"
+  bootstrap_servers: "kafka_broker:9092"
+  # username: "FWNDEFYYI5D4RII2"
+  # password: "cfltk4VkQCqAu/toxD5DYuapfzkth71nFFNADK+taynZkdrZRDgZ/2oiwM8WZcog"
   topic: "transactions"
   output_topic: "fraud_predictions"
-  security_protocol: 'SASL_SSL'
+  security_protocol: 'PLAINTEXT'
   timeout: 12000
 
 

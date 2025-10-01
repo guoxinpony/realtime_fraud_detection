@@ -73,6 +73,54 @@ services:
       - realtime-fraud-detection
 
 
+  kafka_broker:
+    image: redpandadata/redpanda:v24.1.1
+    container_name: kafka_broker
+    restart: 
+      unless-stopped
+    command: >
+      redpanda start
+      --smp 1
+      --overprovisioned
+      --node-id 0
+      --mode dev-container
+      --set auto_create_topics_enabled=true
+      --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      --advertise-kafka-addr internal://kafka_broker:9092,external://localhost:19092
+      --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      --advertise-pandaproxy-addr internal://kafka_broker:8082,external://localhost:18082
+      --rpc-addr kafka_broker:33145
+      --advertise-rpc-addr kafka_broker:33145
+    ports:
+      - 19092:19092    # Kafka external
+      - 18081:18081    # Schema Registry external
+      - 18082:18082    # Pandaproxy external
+      - 19644:9644     # Admin API external
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    networks:
+      - realtime-fraud-detection
+
+
+
+  kafka_console:
+    image: docker.redpanda.com/redpandadata/console:v2.7.2
+    container_name: kafka_console
+    depends_on:
+      - kafka_broker
+    environment:
+      CONFIG_FILEPATH: /etc/console/config.yml
+    volumes:
+      - ./config/redpanda-console.yml:/etc/console/config.yml:ro
+    ports:
+      - "8090:8080"
+    networks:
+      - realtime-fraud-detection
+
+
+
+
   airflow-webserver:
     build:
       context: ./airflow
@@ -295,22 +343,22 @@ services:
       - realtime-fraud-detection
 
 
-  # producer:
-  #   build: ./producer
-  #   env_file: .env
-  #   deploy:
-  #     replicas: 1
-  #     resources:
-  #       limits:
-  #         cpus: '1'
-  #         memory: 1G
-  #   volumes:
-  #     - ./data:/data
-  #   command:
-  #     - "--file"
-  #     - "/data/fraud_detection_data.csv"
-  #   networks:
-  #     - realtime-fraud-detection
+  producer:
+    build: ./producer
+    env_file: .env
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+    # volumes:
+    #   - ./data:/data
+    # command:
+    #   - "--file"
+    #   - "/data/fraud_detection_data.csv"
+    networks:
+      - realtime-fraud-detection
 
   inference:
     build: ./inference
@@ -327,6 +375,7 @@ volumes:
   postgres-db-volume:
   minio_data:
   postgres-db-volume_mlflow:
+  redpanda-data:
 
 networks:
   realtime-fraud-detection:

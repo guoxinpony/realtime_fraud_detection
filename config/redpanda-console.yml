@@ -1,0 +1,7 @@
+kafka:
+  brokers:
+    - kafka_broker:9092
+  schemaRegistry:
+    enabled: true
+    urls:
+      - http://kafka_broker:8081
