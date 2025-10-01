@@ -40,4 +40,4 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY . .
 
 # Entrypoint
-ENTRYPOINT ["python3", "main2.py"]
+ENTRYPOINT ["python3", "main.py"]
