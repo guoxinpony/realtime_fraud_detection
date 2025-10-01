@@ -156,18 +156,32 @@ class FraudDetectionInference:
 
         # Load Kafka configuration parameters with fallback values
         kafka_config = self.config["kafka"]
-        kafka_bootstrap_servers = kafka_config.get("bootstrap_servers", "localhost:9092")
+        kafka_bootstrap_servers = kafka_config.get("bootstrap_servers", "localhost:19092")
         kafka_topic = kafka_config["topic"]
-        kafka_security_protocol = kafka_config.get("security_protocol", "SASL_SSL")
+        kafka_security_protocol = kafka_config.get("security_protocol", "PLAINTEXT").upper()
         kafka_sasl_mechanism = kafka_config.get("sasl_mechanism", "PLAIN")
         kafka_username = kafka_config.get("username")
         kafka_password = kafka_config.get("password")
 
+
+        kafka_options = {
+            "kafka.bootstrap.servers": kafka_bootstrap_servers,
+            "subscribe": kafka_topic,
+            "startingOffsets": "latest",
+            "kafka.security.protocol": kafka_security_protocol,
+        }
+
         # Configure Kafka SASL authentication string
-        kafka_sasl_jaas_config = (
-            f'org.apache.kafka.common.security.plain.PlainLoginModule required '
-            f'username="{kafka_username}" password="{kafka_password}";'
-        )
+        if kafka_security_protocol.startswith("SASL"):
+            kafka_options.update({
+                "kafka.sasl.mechanism": kafka_sasl_mechanism,
+                "kafka.sasl.jaas.config": (
+                    f'org.apache.kafka.common.security.plain.PlainLoginModule required '
+                    f'username="{kafka_username}" password="{kafka_password}";'
+                ),
+            })
+
+        
 
         # Store Kafka configuration in instance variables for reuse
         self.bootstrap_servers = kafka_bootstrap_servers
@@ -176,7 +190,7 @@ class FraudDetectionInference:
         self.sasl_mechanism = kafka_sasl_mechanism
         self.username = kafka_username
         self.password = kafka_password
-        self.sasl_jaas_config = kafka_sasl_jaas_config
+        self.sasl_jaas_config = kafka_options.get("kafka.sasl.jaas.config")
 
         # Define schema for incoming JSON transaction data
         json_schema = StructType([
@@ -192,12 +206,7 @@ class FraudDetectionInference:
         # Create streaming DataFrame from Kafka source
         df = self.spark.readStream \
             .format("kafka") \
-            .option("kafka.bootstrap.servers", kafka_bootstrap_servers) \
-            .option("subscribe", kafka_topic) \
-            .option("startingOffsets", "latest") \
-            .option("kafka.security.protocol", kafka_security_protocol) \
-            .option("kafka.sasl.mechanism", kafka_sasl_mechanism) \
-            .option("kafka.sasl.jaas.config", kafka_sasl_jaas_config) \
+            .options(**kafka_options) \
             .load()
 
         # Parse JSON payload using defined schema
@@ -319,22 +328,42 @@ class FraudDetectionInference:
         # Filter to only include high-confidence fraud predictions
         fraud_predictions = prediction_df.filter(col("prediction") == 1)
 
-        # Write results back to Kafka topic
-        (fraud_predictions.selectExpr(
-            "CAST(transaction_id AS STRING) AS key",
-            "to_json(struct(*)) AS value"  # Serialize all fields as JSON
+        # # Write results back to Kafka topic
+        # (fraud_predictions.selectExpr(
+        #     "CAST(transaction_id AS STRING) AS key",
+        #     "to_json(struct(*)) AS value"  # Serialize all fields as JSON
+        # )
+        #  .writeStream
+        #  .format("kafka")
+        #  .option("kafka.bootstrap.servers", self.bootstrap_servers)
+        #  .option("topic", 'fraud_predictions')  # Output topic for fraud alerts
+        #  .option("kafka.security.protocol", self.security_protocol)
+        #  .option("kafka.sasl.mechanism", self.sasl_mechanism)
+        #  .option("kafka.sasl.jaas.config", self.sasl_jaas_config)
+        #  .option("checkpointLocation", "checkpoints/checkpoint")  # For fault tolerance and recovery
+        #  .outputMode("update")  # Only write updated records
+        #  .start()
+        #  .awaitTermination())  # Keep the streaming context alive
+
+        writer = (
+            fraud_predictions.selectExpr(
+                "CAST(transaction_id AS STRING) AS key",
+                "to_json(struct(*)) AS value"  # Serialize all fields as JSON
+            )
+            .writeStream
+            .format("kafka")
+            .option("kafka.bootstrap.servers", self.bootstrap_servers)
+            .option("topic", self.config["kafka"].get("output_topic", "fraud_predictions"))
+            .option("kafka.security.protocol", self.security_protocol)
+            .option("checkpointLocation", "checkpoints/checkpoint")
+            .outputMode("update")
         )
-         .writeStream
-         .format("kafka")
-         .option("kafka.bootstrap.servers", self.bootstrap_servers)
-         .option("topic", 'fraud_predictions')  # Output topic for fraud alerts
-         .option("kafka.security.protocol", self.security_protocol)
-         .option("kafka.sasl.mechanism", self.sasl_mechanism)
-         .option("kafka.sasl.jaas.config", self.sasl_jaas_config)
-         .option("checkpointLocation", "checkpoints/checkpoint")  # For fault tolerance and recovery
-         .outputMode("update")  # Only write updated records
-         .start()
-         .awaitTermination())  # Keep the streaming context alive
+
+        if self.security_protocol.startswith("SASL"):
+            writer = writer.option("kafka.sasl.mechanism", self.sasl_mechanism) \
+                            .option("kafka.sasl.jaas.config", self.sasl_jaas_config)
+                
+        writer.start().awaitTermination()
 
 
 if __name__ == "__main__":
