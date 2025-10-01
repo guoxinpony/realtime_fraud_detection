@@ -113,10 +113,15 @@ class FraudDetectionTraining:
 
         Fails early to prevent partial initialization states.
         """
-        required_vars = ['KAFKA_BOOTSTRAP_SERVERS', 'KAFKA_USERNAME', 'KAFKA_PASSWORD']
+        security_protocol = self.config['kafka'].get('security_protocol', 'PLAINTEXT')
+        required_vars = ['KAFKA_BOOTSTRAP_SERVERS']
+        if security_protocol.upper().startswith('SASL'):
+            required_vars.extend(['KAFKA_USERNAME', 'KAFKA_PASSWORD'])
+
         missing = [var for var in required_vars if not os.getenv(var)]
         if missing:
             raise ValueError(f'Missing required environment variables: {missing}')
+
 
         self._check_minio_connection()
 
@@ -174,16 +179,23 @@ class FraudDetectionTraining:
 
             # read configs 
             # build connection to kafka server and read all data into python env
+
+            security_protocol = self.config['kafka'].get('security_protocol', 'PLAINTEXT').upper()
+            sasl_kwargs = {}
+            if security_protocol.startswith('SASL'):
+                sasl_kwargs = {
+                    'sasl_mechanism': self.config['kafka'].get('sasl_mechanism', 'PLAIN'),
+                    'sasl_plain_username': self.config['kafka'].get('username'),
+                    'sasl_plain_password': self.config['kafka'].get('password'),
+                }
             consumer = KafkaConsumer(
                 topic,
                 bootstrap_servers=self.config['kafka']['bootstrap_servers'].split(','),
-                security_protocol='SASL_SSL',
-                sasl_mechanism='PLAIN',
-                sasl_plain_username=self.config['kafka']['username'],
-                sasl_plain_password=self.config['kafka']['password'],
+                security_protocol=security_protocol,
                 value_deserializer=lambda x: json.loads(x.decode('utf-8')),
                 auto_offset_reset='earliest',
-                consumer_timeout_ms=self.config['kafka'].get('timeout', 10000)
+                consumer_timeout_ms=self.config['kafka'].get('timeout', 10000),
+                **sasl_kwargs,
             )
 
             # load and format messages into DataFrame, limmit to 30000 msgs
