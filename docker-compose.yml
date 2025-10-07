@@ -352,11 +352,11 @@ services:
         limits:
           cpus: '1'
           memory: 1G
-    # volumes:
-    #   - ./data:/data
-    # command:
-    #   - "--file"
-    #   - "/data/fraud_detection_data.csv"
+    volumes:
+      - ./data:/data
+    command:
+      - "--file"
+      - "/data/fraud_detection_data.csv"
     networks:
       - realtime-fraud-detection
 

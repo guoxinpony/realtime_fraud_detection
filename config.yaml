@@ -1,6 +1,6 @@
 mlflow:
   experiment_name: "fraud_detection"
-  registered_model_name: "fraud_detection_xgboost"
+  registered_model_name: "fraud_detection_default"
   tracking_uri: "http://mlflow-server:5500"
   artifact_location: "s3://mlflow/fraud_detection"
   s3_endpoint_url: "http://minio:9000"
@@ -10,24 +10,33 @@ kafka:
   bootstrap_servers: "kafka_broker:9092"
   # username: "FWNDEFYYI5D4RII2"
   # password: "cfltk4VkQCqAu/toxD5DYuapfzkth71nFFNADK+taynZkdrZRDgZ/2oiwM8WZcog"
-  topic: "transactions"
+  topic: "ml_model_train"
+  test_data: "fraud_test_data"
   output_topic: "fraud_predictions"
   security_protocol: 'PLAINTEXT'
   timeout: 12000
+  max_messages: 20000
 
+data:
+  training_csv: "./data/fraud_detection_data.csv"
 
-model:
-  test_size: 0.2
-  seed: 666
-  params:
-    n_estimators: 50
-    learning_rate: 0.05
-    max_depth: 5
-    subsample: 0.8
-    colsample_bytree: 0.8
+models:
+  xgboost:
+    test_size: 0.2
+    seed: 666
+    params:
+      n_estimators: 50
+      learning_rate: 0.05
+      max_depth: 5
+      subsample: 0.8
+      colsample_bytree: 0.8
     scale_pos_weight: 1
     tree_method: "hist"
-  path: "/app/models/fraud_detection_model_TEST.pkl"
+    path: "/app/models/fraud_detection_model_xgboost.pkl"
+    test_path: "/app/models/fraud_detection_model_TEST.pkl"
+    mlflow_registered_model_name: "fraud_detection_xgboost"
+
+
 
 
 spark:
