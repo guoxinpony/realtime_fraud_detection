@@ -64,6 +64,10 @@ class FraudDetectionTraining:
 
         # Configuration lifecycle management
         self.config = self._load_config(config_path)
+        models_cfg = self.config.get('models', {})
+        if 'xgboost' not in models_cfg:
+            raise ValueError('Missing `models.xgboost` configuration section.')
+        self.model_config = models_cfg['xgboost']
 
         # Security-conscious credential handling
         env_vars = {
@@ -300,9 +304,9 @@ class FraudDetectionTraining:
 
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y,
-                test_size=self.config['model'].get('test_size', 0.2),
+                test_size=self.model_config.get('test_size', 0.2),
                 stratify=y,
-                random_state=self.config['model'].get('seed', 42)
+                random_state=self.model_config.get('seed', 42)
             )
 
 
@@ -332,18 +336,18 @@ class FraudDetectionTraining:
 
                 xgb = XGBClassifier(
                     eval_metric='aucpr',  # Optimizes for precision-recall area
-                    random_state=self.config['model'].get('seed', 42),
+                    random_state=self.model_config.get('seed', 42),
                     reg_lambda=1.0,
-                    n_estimators=self.config['model']['params']['n_estimators'],
+                    n_estimators=self.model_config['params']['n_estimators'],
                     n_jobs=-1,
                     scale_pos_weight=scale_pos_weight,
-                    tree_method=self.config['model'].get('tree_method', 'hist')  # GPU-compatible
+                    tree_method=self.model_config.get('tree_method', 'hist')  # GPU-compatible
                 )
                 
                 # Imbalanced learning pipeline
                 pipeline = ImbPipeline([
                     ('preprocessor', preprocessor),
-                    # ('smote', SMOTE(sampling_strategy=0.3,random_state=self.config['model'].get('seed', 42))),
+                    # ('smote', SMOTE(sampling_strategy=0.3,random_state=self.model_config.get('seed', 42))),
                     ('classifier', xgb)
                 ])
 
@@ -370,7 +374,7 @@ class FraudDetectionTraining:
                     n_jobs=-1,
                     refit=True,
                     error_score='raise',
-                    random_state=self.config['model'].get('seed', 42)
+                    random_state=self.model_config.get('seed', 42)
                 )
 
                 # find best model and hyperparameters
@@ -454,8 +458,12 @@ class FraudDetectionTraining:
                 )
 
                 # Model serialization for deployment
-                os.makedirs('/app/models', exist_ok=True)
-                joblib.dump(best_model, '/app/models/fraud_detection_model_TEST.pkl')
+                model_path = self.model_config.get(
+                    'test_path',
+                    self.model_config.get('path', '/app/models/fraud_detection_model_TEST.pkl')
+                )
+                os.makedirs(os.path.dirname(model_path), exist_ok=True)
+                joblib.dump(best_model, model_path)
 
                 logger.info('Training successfully completed with metrics: %s', metrics)
 

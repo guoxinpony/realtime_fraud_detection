@@ -18,7 +18,7 @@ default_args = {
 
 def _train_model(**context):
     """Airflow wrapper for training task"""
-    from ml_model_train import FraudDetectionTraining
+    from dags.ml_model_train_TEST import FraudDetectionTraining
     try:
         logger.info('Initializing fraud detection training')
         trainer = FraudDetectionTraining()
