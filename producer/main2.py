@@ -188,7 +188,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--topic",
-        default=os.getenv("KAFKA_TOPIC", "transactions"), # set KAFKA_TOPIC in .env in project root directory
+        default=os.getenv("KAFKA_TOPIC", "ml_model_train"), # set KAFKA_TOPIC in .env in project root directory
         help="Kafka topic to publish to",
     )
     parser.add_argument(
