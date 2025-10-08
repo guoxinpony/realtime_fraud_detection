@@ -360,6 +360,27 @@ services:
     networks:
       - realtime-fraud-detection
 
+
+
+  test_data_feeder:
+    build: ./producer
+    container_name: test_data_feeder
+    env_file: .env
+    restart: unless-stopped
+    depends_on:
+      - kafka_broker
+    volumes:
+      - ./data:/data:ro
+    command:
+      - "--file"
+      - "/data/fraud_detection_data.csv"
+      - "--topic"
+      - "fraud_test_data"
+      - "--sleep"
+      - "2"
+    networks:
+      - realtime-fraud-detection
+
   inference:
     build: ./inference
     env_file: .env
