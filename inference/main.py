@@ -17,8 +17,21 @@ from dotenv import load_dotenv  # For loading environment variables from .env fi
 
 # PySpark imports
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import (from_json, col, hour, dayofmonth,
-                                  dayofweek, when, lit, coalesce)
+from pyspark.sql.functions import (
+    from_json,
+    col,
+    hour,
+    dayofmonth,
+    dayofweek,
+    month,
+    when,
+    lit,
+    coalesce,
+    to_timestamp,
+    from_unixtime,
+    to_json,
+    struct,
+)
 from pyspark.sql.pandas.functions import pandas_udf  # For Pandas vectorized UDFs
 from pyspark.sql.types import (StructType, StructField, StringType,
                               IntegerType, DoubleType, TimestampType)
@@ -68,12 +81,18 @@ class FraudDetectionInference:
 
         # Load pipeline configuration from YAML file
         self.config = self._load_config(config_path)
+        models_config = self.config.get("models", {})
+        self.model_config = models_config.get("xgboost")
+        if not self.model_config:
+            raise ValueError("Missing `models.xgboost` configuration section.")
+
+        self.prediction_threshold = float(self.model_config.get("prediction_threshold", 0.5))
 
         # Initialize Spark session with Kafka integration packages
         self.spark = self._init_spark_session()
 
         # Load and broadcast ML model to worker nodes for distributed inference
-        self.model = self._load_model(self.config["model"]["path"])
+        self.model = self._load_model(self.model_config["path"])
         self.broadcast_model = self.spark.sparkContext.broadcast(self.model)
 
         # Debug: Log loaded environment variables (sensitive values should be masked in production)
@@ -152,17 +171,17 @@ class FraudDetectionInference:
         Returns:
             DataFrame: Spark DataFrame containing parsed transaction data
         """
-        logger.info("Reading data from Kafka topic %s", self.config["kafka"]["topic"])
+        kafka_config = self.config["kafka"]
+        input_topic = kafka_config.get("test_data", kafka_config.get("topic", "fraud_test_data"))
+        logger.info("Reading data from Kafka topic %s", input_topic)
 
         # Load Kafka configuration parameters with fallback values
-        kafka_config = self.config["kafka"]
         kafka_bootstrap_servers = kafka_config.get("bootstrap_servers", "localhost:19092")
-        kafka_topic = kafka_config["topic"]
+        kafka_topic = input_topic
         kafka_security_protocol = kafka_config.get("security_protocol", "PLAINTEXT").upper()
         kafka_sasl_mechanism = kafka_config.get("sasl_mechanism", "PLAIN")
         kafka_username = kafka_config.get("username")
         kafka_password = kafka_config.get("password")
-
 
         kafka_options = {
             "kafka.bootstrap.servers": kafka_bootstrap_servers,
@@ -181,8 +200,6 @@ class FraudDetectionInference:
                 ),
             })
 
-        
-
         # Store Kafka configuration in instance variables for reuse
         self.bootstrap_servers = kafka_bootstrap_servers
         self.topic = kafka_topic
@@ -194,13 +211,29 @@ class FraudDetectionInference:
 
         # Define schema for incoming JSON transaction data
         json_schema = StructType([
-            StructField("transaction_id", StringType(), True),
-            StructField("user_id", IntegerType(), True),
-            StructField("amount", DoubleType(), True),
-            StructField("currency", StringType(), True),
+            StructField("record_id", IntegerType(), True),
+            StructField("transacted_at", StringType(), True),
+            StructField("card_number", StringType(), True),
             StructField("merchant", StringType(), True),
-            StructField("timestamp", TimestampType(), True),
-            StructField("location", StringType(), True),
+            StructField("category", StringType(), True),
+            StructField("amount", DoubleType(), True),
+            StructField("first_name", StringType(), True),
+            StructField("last_name", StringType(), True),
+            StructField("gender", StringType(), True),
+            StructField("street", StringType(), True),
+            StructField("city", StringType(), True),
+            StructField("state", StringType(), True),
+            StructField("zip", DoubleType(), True),
+            StructField("lat", DoubleType(), True),
+            StructField("long", DoubleType(), True),
+            StructField("city_pop", DoubleType(), True),
+            StructField("job", StringType(), True),
+            StructField("dob", StringType(), True),
+            StructField("transaction_id", StringType(), True),
+            StructField("unix_time", DoubleType(), True),
+            StructField("merchant_lat", DoubleType(), True),
+            StructField("merchant_long", DoubleType(), True),
+            StructField("is_fraud", IntegerType(), True),
         ])
 
         # Create streaming DataFrame from Kafka source
@@ -214,6 +247,28 @@ class FraudDetectionInference:
             .select(from_json(col("value"), json_schema).alias("data")) \
             .select("data.*")
 
+        parsed_df = parsed_df.withColumn(
+            "transaction_time",
+            coalesce(
+                to_timestamp(col("transacted_at")),
+                to_timestamp(from_unixtime(col("unix_time")))
+            )
+        )
+
+        parsed_df = parsed_df.withColumn("amount", col("amount").cast("double")) \
+            .withColumn("zip", col("zip").cast("double")) \
+            .withColumn("lat", col("lat").cast("double")) \
+            .withColumn("long", col("long").cast("double")) \
+            .withColumn("city_pop", col("city_pop").cast("double")) \
+            .withColumn("merchant_lat", col("merchant_lat").cast("double")) \
+            .withColumn("merchant_long", col("merchant_long").cast("double"))
+
+        parsed_df = parsed_df.withColumn("gender", coalesce(col("gender"), lit("unknown"))) \
+            .withColumn("category", coalesce(col("category"), lit("unknown"))) \
+            .withColumn("state", coalesce(col("state"), lit("unknown"))) \
+            .withColumn("city", coalesce(col("city"), lit("unknown"))) \
+            .withColumn("merchant", coalesce(col("merchant"), lit("unknown")))
+
         return parsed_df
 
     def add_features(self, df):
@@ -225,14 +280,19 @@ class FraudDetectionInference:
         Returns:
             DataFrame: DataFrame with additional feature columns
         """
+        # Ensure records have usable transaction_time and amount
+        df = df.dropna(subset=["transaction_time", "amount"])
+
         # Temporal features from transaction timestamp
-        df = df.withColumn("transaction_hour", hour(col("timestamp")))
+        df = df.withColumn("transaction_hour", hour(col("transaction_time")))
+        spark_day_of_week = dayofweek(col("transaction_time"))
+        df = df.withColumn("transaction_dayofweek", ((spark_day_of_week + lit(5)) % lit(7)))
+        df = df.withColumn("transaction_month", month(col("transaction_time")))
         df = df.withColumn("is_night",
                            when((col("transaction_hour") >= 22) | (col("transaction_hour") < 5), 1).otherwise(0))
         df = df.withColumn("is_weekend",
-                           when((dayofweek(col("timestamp")) == 1) | (dayofweek(col("timestamp")) == 7),
-                                1).otherwise(0))
-        df = df.withColumn("transaction_day", dayofmonth(col("timestamp")))
+                           when(coalesce(col("transaction_dayofweek"), lit(0)) >= 5, 1).otherwise(0))
+        df = df.withColumn("transaction_day", dayofmonth(col("transaction_time")))
 
         # Transaction pattern features (placeholders - would normally come from historical data)
         # In production, these would be calculated using window functions or join with historical data
@@ -261,7 +321,7 @@ class FraudDetectionInference:
         df = self.read_from_kafka()
 
         # Define watermark to handle late-arriving data (24 hour tolerance)
-        df = df.withWatermark("timestamp", "24 hours")
+        df = df.withWatermark("transaction_time", "24 hours")
 
         # Add engineered features to raw data
         feature_df = self.add_features(df)
@@ -269,100 +329,102 @@ class FraudDetectionInference:
         # Get broadcasted model reference for use in UDF
         broadcast_model = self.broadcast_model
 
+        threshold = self.prediction_threshold
+
         # Define prediction UDF using Pandas for vectorized operations
-        @pandas_udf("int")
+        @pandas_udf("struct<prediction int, fraud_probability double>")
         def predict_udf(
-                user_id: pd.Series,
                 amount: pd.Series,
-                currency: pd.Series,
+                zip_code: pd.Series,
+                lat: pd.Series,
+                long_: pd.Series,
+                city_pop: pd.Series,
+                merchant_lat: pd.Series,
+                merchant_long: pd.Series,
                 transaction_hour: pd.Series,
-                is_weekend: pd.Series,
-                time_since_last_txn: pd.Series,
-                merchant_risk: pd.Series,
-                amount_to_avg_ratio: pd.Series,
-                is_night: pd.Series,
-                transaction_day: pd.Series,
-                user_activity_24h: pd.Series,
-                merchant: pd.Series
-        ) -> pd.Series:
-            """Vectorized UDF for batch prediction using pre-trained model
-
-            Args:
-                Various Pandas Series containing feature values
-
-            Returns:
-                pd.Series: Binary predictions (0=legitimate, 1=fraud)
-            """
-            # Create input DataFrame from feature columns
+                transaction_dayofweek: pd.Series,
+                transaction_month: pd.Series,
+                category: pd.Series,
+                state: pd.Series,
+                gender: pd.Series,
+                city: pd.Series,
+                merchant: pd.Series,
+        ) -> pd.DataFrame:
+            """Vectorized UDF returning predictions and probabilities."""
             input_df = pd.DataFrame({
-                "user_id": user_id,
                 "amount": amount,
-                "currency": currency,
+                "zip": zip_code,
+                "lat": lat,
+                "long": long_,
+                "city_pop": city_pop,
+                "merchant_lat": merchant_lat,
+                "merchant_long": merchant_long,
                 "transaction_hour": transaction_hour,
-                "is_weekend": is_weekend,
-                "time_since_last_txn": time_since_last_txn,
-                "merchant_risk": merchant_risk,
-                "amount_to_avg_ratio": amount_to_avg_ratio,
-                "is_night": is_night,
-                "transaction_day": transaction_day,
-                "user_activity_24h": user_activity_24h,
-                "merchant": merchant
+                "transaction_dayofweek": transaction_dayofweek,
+                "transaction_month": transaction_month,
+                "category": category,
+                "state": state,
+                "gender": gender,
+                "city": city,
+                "merchant": merchant,
             })
 
-            # Get fraud probabilities and apply classification threshold
             probabilities = broadcast_model.value.predict_proba(input_df)[:, 1]
-            threshold = 0.60  # Tuned based on precision/recall requirements
             predictions = (probabilities >= threshold).astype(int)
-            return pd.Series(predictions)
+            return pd.DataFrame({
+                "prediction": predictions,
+                "fraud_probability": probabilities,
+            })
 
-        # Apply predictions to streaming DataFrame
-        prediction_df = feature_df.withColumn("prediction", predict_udf(
-            *[col(f) for f in [
-                "user_id", "amount", "currency", "transaction_hour",
-                "is_weekend", "time_since_last_txn", "merchant_risk",
-                "amount_to_avg_ratio", "is_night", "transaction_day",
-                "user_activity_24h", "merchant"
-            ]]
-        ))
+        prediction_df = feature_df.withColumn(
+            "prediction_struct",
+            predict_udf(*[
+                col(f) for f in [
+                    "amount",
+                    "zip",
+                    "lat",
+                    "long",
+                    "city_pop",
+                    "merchant_lat",
+                    "merchant_long",
+                    "transaction_hour",
+                    "transaction_dayofweek",
+                    "transaction_month",
+                    "category",
+                    "state",
+                    "gender",
+                    "city",
+                    "merchant",
+                ]
+            ])
+        )
 
-        # Filter to only include high-confidence fraud predictions
-        fraud_predictions = prediction_df.filter(col("prediction") == 1)
+        prediction_df = (
+            prediction_df
+            .withColumn("prediction", col("prediction_struct.prediction"))
+            .withColumn("fraud_probability", col("prediction_struct.fraud_probability"))
+            .drop("prediction_struct")
+        )
 
-        # # Write results back to Kafka topic
-        # (fraud_predictions.selectExpr(
-        #     "CAST(transaction_id AS STRING) AS key",
-        #     "to_json(struct(*)) AS value"  # Serialize all fields as JSON
-        # )
-        #  .writeStream
-        #  .format("kafka")
-        #  .option("kafka.bootstrap.servers", self.bootstrap_servers)
-        #  .option("topic", 'fraud_predictions')  # Output topic for fraud alerts
-        #  .option("kafka.security.protocol", self.security_protocol)
-        #  .option("kafka.sasl.mechanism", self.sasl_mechanism)
-        #  .option("kafka.sasl.jaas.config", self.sasl_jaas_config)
-        #  .option("checkpointLocation", "checkpoints/checkpoint")  # For fault tolerance and recovery
-        #  .outputMode("update")  # Only write updated records
-        #  .start()
-        #  .awaitTermination())  # Keep the streaming context alive
-
+        output_topic = self.config["kafka"].get("output_topic", "fraud_predictions")
         writer = (
-            fraud_predictions.selectExpr(
+            prediction_df.selectExpr(
                 "CAST(transaction_id AS STRING) AS key",
-                "to_json(struct(*)) AS value"  # Serialize all fields as JSON
+                "to_json(struct(*)) AS value"
             )
             .writeStream
             .format("kafka")
             .option("kafka.bootstrap.servers", self.bootstrap_servers)
-            .option("topic", self.config["kafka"].get("output_topic", "fraud_predictions"))
+            .option("topic", output_topic)
             .option("kafka.security.protocol", self.security_protocol)
-            .option("checkpointLocation", "checkpoints/checkpoint")
-            .outputMode("update")
+            .option("checkpointLocation", "checkpoints/inference")
+            .outputMode("append")
         )
 
         if self.security_protocol.startswith("SASL"):
             writer = writer.option("kafka.sasl.mechanism", self.sasl_mechanism) \
                             .option("kafka.sasl.jaas.config", self.sasl_jaas_config)
-                
+
         writer.start().awaitTermination()
 
 
