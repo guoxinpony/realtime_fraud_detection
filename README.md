@@ -1,2 +1,9 @@
-# realtime_fraud_detection
-realtime fraud detection using kafka, Apache Airflow, MLflow and spark
+# Realtime Fraud Fetection System
+Realtime fraud detection using Redpanda, Apache Airflow, MLflow and Apache Spark
+
+![archi](archi.png)
+
+
+
+
+
