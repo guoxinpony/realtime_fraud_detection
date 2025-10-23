@@ -1,3 +1,13 @@
-Place dataset "fraud_detection_data" in the ./data directory
+Place dataset in the ./data directory
 
-Download: https://drive.google.com/file/d/1y1QqL1BdJKMpEu4dOB5OKANPeUxIkl3X/view?usp=sharing
+How to get dataset: 
+
+1. Download directly from: 
+          https://drive.google.com/file/d/1y1QqL1BdJKMpEu4dOB5OKANPeUxIkl3X/view?usp=sharing
+
+OR
+
+2. Download raw dataset from Kaggle (to ./data) and merge manully: 
+        https://www.kaggle.com/datasets/kartik2112/fraud-detection
+        Run python ./data_preprocess/merge_data.py
+

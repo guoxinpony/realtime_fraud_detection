@@ -35,6 +35,17 @@ models:
     path: "/app/models/fraud_detection_model_xgboost.pkl"
     test_path: "/app/models/fraud_detection_model_TEST.pkl"
     mlflow_registered_model_name: "fraud_detection_xgboost"
+  logistic:
+    test_size: 0.2
+    seed: 666
+    params:
+      solver: "lbfgs"
+      max_iter: 1000
+      class_weight: "balanced"
+      C: 1.0
+    path: "/app/models/fraud_detection_model_logistic.pkl"
+    test_path: "/app/models/fraud_detection_model_logistic_TEST.pkl"
+    mlflow_registered_model_name: "fraud_detection_logistic"
 
 
 
