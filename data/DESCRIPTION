@@ -7,7 +7,6 @@ How to get dataset:
 
 OR
 
-2. Download raw dataset from Kaggle (to ./data) and merge manully: 
-        https://www.kaggle.com/datasets/kartik2112/fraud-detection
-        Run python ./data_preprocess/merge_data.py
+2. Download two raw datasets fraudTest.csv and fraudTrain.csv from Kaggle (to ./data) and merge manully: https://www.kaggle.com/datasets/kartik2112/fraud-detection
+Run python ./data_preprocess/merge_data.py
 
