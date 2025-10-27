@@ -15,7 +15,7 @@ kafka:
   output_topic: "fraud_predictions"
   security_protocol: 'PLAINTEXT'
   timeout: 12000
-  max_messages: 20000
+  max_messages: 100000
 
 data:
   training_csv: "./data/fraud_detection_data.csv"
@@ -23,20 +23,26 @@ data:
 models:
   xgboost:
     test_size: 0.2
+    validation_size: 0.1
+    early_stopping_rounds: 25
+    threshold_recall_target: 0.9
     seed: 666
     params:
-      n_estimators: 50
-      learning_rate: 0.05
-      max_depth: 5
-      subsample: 0.8
+      n_estimators: 200
+      learning_rate: 0.08
+      max_depth: 4
+      subsample: 0.85
       colsample_bytree: 0.8
-    scale_pos_weight: 1
-    tree_method: "hist"
+      tree_method: "hist"
+      scale_pos_weight: 132.33
     path: "/app/models/fraud_detection_model_xgboost.pkl"
     test_path: "/app/models/fraud_detection_model_TEST.pkl"
     mlflow_registered_model_name: "fraud_detection_xgboost"
   logistic:
     test_size: 0.2
+    validation_size: 0.1
+    threshold_recall_target: 0.9
+    negative_downsample_ratio: 0.4
     seed: 666
     params:
       solver: "lbfgs"

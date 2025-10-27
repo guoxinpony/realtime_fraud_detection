@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -15,7 +16,7 @@ from kafka import KafkaConsumer
 from mlflow.models import infer_signature
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import average_precision_score, f1_score, precision_score, recall_score
+from sklearn.metrics import average_precision_score, f1_score, precision_score, precision_recall_curve, recall_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OrdinalEncoder, StandardScaler
@@ -231,9 +232,19 @@ class XGBoostFraudTrainer:
         df["gender"] = df.get("gender", "unknown").fillna("unknown")
         return df
 
-    def train_model(self) -> Tuple[Pipeline, Dict[str, float]]:
+    def train_model(
+        self,
+        df: Optional[pd.DataFrame] = None,
+        params_override: Optional[Dict[str, float]] = None,
+        run_name: Optional[str] = None,
+        log_to_mlflow: bool = True,
+        persist_model: bool = True,
+    ) -> Tuple[Pipeline, Dict[str, float]]:
         logger.info("Starting XGBoost fraud detection training workflow.")
-        df = self.read_from_kafka()
+        if df is None:
+            df = self.read_from_kafka()
+        else:
+            df = df.copy()
         df = self._augment_features(df)
 
         features = df.drop(columns=["is_fraud", "transaction_time"])
@@ -243,9 +254,12 @@ class XGBoostFraudTrainer:
             raise ValueError("No fraud samples present in the training data.")
 
         test_size = float(self.model_config.get("test_size", 0.2))
+        validation_size = float(self.model_config.get("validation_size", 0.1))
+        early_stopping_rounds = int(self.model_config.get("early_stopping_rounds", 25))
+        threshold_recall_target = float(self.model_config.get("threshold_recall_target", 0.95))
         seed = int(self.model_config.get("seed", 42))
 
-        X_train, X_test, y_train, y_test = train_test_split(
+        X_train_full, X_test, y_train_full, y_test = train_test_split(
             features,
             target,
             test_size=test_size,
@@ -253,9 +267,31 @@ class XGBoostFraudTrainer:
             random_state=seed,
         )
 
+        X_train, y_train = X_train_full, y_train_full
+        X_val = y_val = None
+        if 0 < validation_size < 1:
+            try:
+                X_train, X_val, y_train, y_val = train_test_split(
+                    X_train_full,
+                    y_train_full,
+                    test_size=validation_size,
+                    stratify=y_train_full,
+                    random_state=seed,
+                )
+            except ValueError as exc:
+                logger.warning("Skipping validation split (validation_size=%s): %s", validation_size, exc)
+                X_train, y_train = X_train_full, y_train_full
+                X_val = y_val = None
+
         preprocessor = self._build_feature_pipeline()
+        preprocessor.fit(X_train)
+
+        X_train_processed = preprocessor.transform(X_train)
+        X_val_processed = preprocessor.transform(X_val) if X_val is not None else None
 
         params = dict(self.model_config.get("params", {}))
+        if params_override:
+            params.update(params_override)
         params.setdefault("n_jobs", -1)
         params.setdefault("eval_metric", "aucpr")
 
@@ -265,11 +301,7 @@ class XGBoostFraudTrainer:
         else:
             params["scale_pos_weight"] = params.get("scale_pos_weight", 1)
 
-        model = XGBClassifier(
-            random_state=seed,
-            **params,
-        )
-
+        model = XGBClassifier(random_state=seed, **params)
         pipeline = Pipeline(
             steps=[
                 ("preprocessor", preprocessor),
@@ -277,38 +309,100 @@ class XGBoostFraudTrainer:
             ]
         )
 
-        with mlflow.start_run():
-            mlflow.log_params({f"classifier__{k}": v for k, v in params.items()})
-            mlflow.log_metric("train_samples", float(len(X_train)))
-            mlflow.log_metric("positive_ratio", float(fraud_ratio))
+        fit_kwargs = {}
+        if X_val_processed is not None and early_stopping_rounds > 0:
+            fit_kwargs["eval_set"] = [(X_val_processed, y_val)]
+            fit_kwargs["verbose"] = False
+            try:
+                model.set_params(early_stopping_rounds=early_stopping_rounds)
+            except ValueError as exc:
+                logger.warning("Early stopping unsupported by installed XGBoost: %s", exc)
 
-            pipeline.fit(X_train, y_train)
+        run_ctx = (
+            mlflow.start_run(run_name=run_name, nested=mlflow.active_run() is not None)
+            if log_to_mlflow
+            else nullcontext()
+        )
+        with run_ctx:
+            if log_to_mlflow:
+                mlflow.log_params({f"classifier__{k}": v for k, v in params.items()})
+                mlflow.log_metric("train_samples", float(len(X_train)))
+                mlflow.log_metric("positive_ratio", float(fraud_ratio))
+                mlflow.log_param("validation_size", validation_size)
+                if X_val is not None:
+                    mlflow.log_metric("validation_samples", float(len(X_val)))
+                mlflow.log_param("early_stopping_rounds", early_stopping_rounds)
+                mlflow.log_param("threshold_recall_target", threshold_recall_target)
+
+            model.fit(X_train_processed, y_train, **fit_kwargs)
+            if log_to_mlflow and hasattr(model, "best_iteration") and model.best_iteration is not None:
+                mlflow.log_metric("best_iteration", float(model.best_iteration))
 
             y_proba = pipeline.predict_proba(X_test)[:, 1]
             y_pred = (y_proba >= 0.5).astype(int)
+            avg_precision = float(average_precision_score(y_test, y_proba))
+            roc_auc = float(roc_auc_score(y_test, y_proba))
+
+            decision_threshold = 0.5
+            decision_threshold_precision = None
+            decision_threshold_recall = None
+            if X_val_processed is not None:
+                val_proba = model.predict_proba(X_val_processed)[:, 1]
+                precisions, recalls, thresholds = precision_recall_curve(y_val, val_proba)
+                if len(thresholds) > 0:
+                    precisions = precisions[:-1]
+                    recalls = recalls[:-1]
+                    candidates = [
+                        (precisions[i], recalls[i], thresholds[i])
+                        for i in range(len(thresholds))
+                        if recalls[i] >= threshold_recall_target
+                    ]
+                    if candidates:
+                        decision_threshold_precision, decision_threshold_recall, decision_threshold = max(
+                            candidates,
+                            key=lambda item: item[0],
+                        )
+                    else:
+                        denom = np.clip(precisions + recalls, a_min=1e-12, a_max=None)
+                        f1_vals = 2 * precisions * recalls / denom
+                        best_index = int(np.argmax(f1_vals))
+                        decision_threshold = float(thresholds[best_index])
+                        decision_threshold_precision = float(precisions[best_index])
+                        decision_threshold_recall = float(recalls[best_index])
+                decision_threshold = float(decision_threshold)
 
             metrics = {
-                "avg_precision": float(average_precision_score(y_test, y_proba)),
+                "avg_precision": avg_precision,
+                "roc_auc": roc_auc,
                 "precision": float(precision_score(y_test, y_pred, zero_division=0)),
                 "recall": float(recall_score(y_test, y_pred, zero_division=0)),
                 "f1": float(f1_score(y_test, y_pred, zero_division=0)),
             }
+            metrics["decision_threshold"] = float(decision_threshold)
+            if decision_threshold_precision is not None:
+                metrics["threshold_precision_at_target"] = float(decision_threshold_precision)
+            if decision_threshold_recall is not None:
+                metrics["threshold_recall_at_target"] = float(decision_threshold_recall)
 
-            mlflow.log_metrics(metrics)
+            if log_to_mlflow:
+                mlflow.log_metrics(metrics)
 
-            signature = infer_signature(X_train, pipeline.predict_proba(X_train)[:, 1])
-            log_model_kwargs = {
-                "sk_model": pipeline,
-                "artifact_path": "model",
-                "signature": signature,
-            }
-            if self.registered_model_name:
-                log_model_kwargs["registered_model_name"] = self.registered_model_name
-            mlflow.sklearn.log_model(**log_model_kwargs)
+                signature = infer_signature(X_train, pipeline.predict_proba(X_train)[:, 1])
+                log_model_kwargs = {
+                    "sk_model": pipeline,
+                    "artifact_path": "model",
+                    "signature": signature,
+                }
+                if self.registered_model_name:
+                    log_model_kwargs["registered_model_name"] = self.registered_model_name
+                mlflow.sklearn.log_model(**log_model_kwargs)
 
-        model_path = self._resolve_path(str(self.model_config.get("path", "/app/models/fraud_detection_model.pkl")))
-        model_path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(pipeline, model_path)
-        logger.info("Training complete; model saved to %s", model_path)
+        if persist_model:
+            model_path = self._resolve_path(str(self.model_config.get("path", "/app/models/fraud_detection_model.pkl")))
+            model_path.parent.mkdir(parents=True, exist_ok=True)
+            joblib.dump(pipeline, model_path)
+            logger.info("Training complete; model saved to %s", model_path)
+        else:
+            logger.info("Training complete; model persistence skipped per configuration.")
 
         return pipeline, metrics
