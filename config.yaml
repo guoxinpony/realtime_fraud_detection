@@ -15,7 +15,7 @@ kafka:
   output_topic: "fraud_predictions"
   security_protocol: 'PLAINTEXT'
   timeout: 12000
-  max_messages: 100000
+  max_messages: 20000
 
 data:
   training_csv: "./data/fraud_detection_data.csv"
@@ -24,6 +24,7 @@ models:
   xgboost:
     test_size: 0.2
     validation_size: 0.1
+    n_folds: 10
     early_stopping_rounds: 25
     threshold_recall_target: 0.9
     seed: 666
@@ -41,6 +42,7 @@ models:
   logistic:
     test_size: 0.2
     validation_size: 0.1
+    n_folds: 10
     threshold_recall_target: 0.9
     negative_downsample_ratio: 0.4
     seed: 666
@@ -52,6 +54,24 @@ models:
     path: "/app/models/fraud_detection_model_logistic.pkl"
     test_path: "/app/models/fraud_detection_model_logistic_TEST.pkl"
     mlflow_registered_model_name: "fraud_detection_logistic"
+  catboost:
+    test_size: 0.2
+    validation_size: 0.1
+    n_folds: 10
+    early_stopping_rounds: 25
+    threshold_recall_target: 0.9
+    seed: 666
+    params:
+      iterations: 200
+      learning_rate: 0.08
+      depth: 6
+      l2_leaf_reg: 3
+      loss_function: "Logloss"
+      eval_metric: "PRAUC"
+      task_type: "CPU"
+    path: "/app/models/fraud_detection_model_catboost.pkl"
+    test_path: "/app/models/fraud_detection_model_catboost_TEST.pkl"
+    mlflow_registered_model_name: "fraud_detection_catboost"
 
 
 

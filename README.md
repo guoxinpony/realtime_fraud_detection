@@ -1,4 +1,4 @@
-# Realtime Fraud Fetection System
+# Realtime Fraud Detection System
 Realtime fraud detection using Redpanda, Apache Airflow, MLflow and Apache Spark
 
 ![archi](archi.png)

@@ -17,7 +17,7 @@ from mlflow.models import infer_signature
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import average_precision_score, f1_score, precision_score, precision_recall_curve, recall_score, roc_auc_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OrdinalEncoder, StandardScaler
 from xgboost import XGBClassifier
@@ -240,7 +240,7 @@ class XGBoostFraudTrainer:
         log_to_mlflow: bool = True,
         persist_model: bool = True,
     ) -> Tuple[Pipeline, Dict[str, float]]:
-        logger.info("Starting XGBoost fraud detection training workflow.")
+        logger.info("Starting XGBoost fraud detection training workflow with 10-fold cross-validation.")
         if df is None:
             df = self.read_from_kafka()
         else:
@@ -254,11 +254,12 @@ class XGBoostFraudTrainer:
             raise ValueError("No fraud samples present in the training data.")
 
         test_size = float(self.model_config.get("test_size", 0.2))
-        validation_size = float(self.model_config.get("validation_size", 0.1))
+        n_folds = int(self.model_config.get("n_folds", 10))
         early_stopping_rounds = int(self.model_config.get("early_stopping_rounds", 25))
         threshold_recall_target = float(self.model_config.get("threshold_recall_target", 0.95))
         seed = int(self.model_config.get("seed", 42))
 
+        # Split data into train (for CV) and test (for final evaluation)
         X_train_full, X_test, y_train_full, y_test = train_test_split(
             features,
             target,
@@ -267,27 +268,10 @@ class XGBoostFraudTrainer:
             random_state=seed,
         )
 
-        X_train, y_train = X_train_full, y_train_full
-        X_val = y_val = None
-        if 0 < validation_size < 1:
-            try:
-                X_train, X_val, y_train, y_val = train_test_split(
-                    X_train_full,
-                    y_train_full,
-                    test_size=validation_size,
-                    stratify=y_train_full,
-                    random_state=seed,
-                )
-            except ValueError as exc:
-                logger.warning("Skipping validation split (validation_size=%s): %s", validation_size, exc)
-                X_train, y_train = X_train_full, y_train_full
-                X_val = y_val = None
+        logger.info("Data split: %d samples for cross-validation, %d samples for final test", 
+                   len(X_train_full), len(X_test))
 
         preprocessor = self._build_feature_pipeline()
-        preprocessor.fit(X_train)
-
-        X_train_processed = preprocessor.transform(X_train)
-        X_val_processed = preprocessor.transform(X_val) if X_val is not None else None
 
         params = dict(self.model_config.get("params", {}))
         if params_override:
@@ -295,60 +279,89 @@ class XGBoostFraudTrainer:
         params.setdefault("n_jobs", -1)
         params.setdefault("eval_metric", "aucpr")
 
-        fraud_ratio = y_train.mean()
-        if fraud_ratio > 0:
-            params["scale_pos_weight"] = max(params.get("scale_pos_weight", 1), (1 - fraud_ratio) / fraud_ratio)
-        else:
-            params["scale_pos_weight"] = params.get("scale_pos_weight", 1)
-
-        model = XGBClassifier(random_state=seed, **params)
-        pipeline = Pipeline(
-            steps=[
-                ("preprocessor", preprocessor),
-                ("classifier", model),
-            ]
-        )
-
-        fit_kwargs = {}
-        if X_val_processed is not None and early_stopping_rounds > 0:
-            fit_kwargs["eval_set"] = [(X_val_processed, y_val)]
-            fit_kwargs["verbose"] = False
-            try:
-                model.set_params(early_stopping_rounds=early_stopping_rounds)
-            except ValueError as exc:
-                logger.warning("Early stopping unsupported by installed XGBoost: %s", exc)
-
         run_ctx = (
             mlflow.start_run(run_name=run_name, nested=mlflow.active_run() is not None)
             if log_to_mlflow
             else nullcontext()
         )
+
         with run_ctx:
             if log_to_mlflow:
                 mlflow.log_params({f"classifier__{k}": v for k, v in params.items()})
-                mlflow.log_metric("train_samples", float(len(X_train)))
-                mlflow.log_metric("positive_ratio", float(fraud_ratio))
-                mlflow.log_param("validation_size", validation_size)
-                if X_val is not None:
-                    mlflow.log_metric("validation_samples", float(len(X_val)))
+                mlflow.log_metric("train_samples", float(len(X_train_full)))
+                mlflow.log_metric("test_samples", float(len(X_test)))
+                mlflow.log_metric("positive_ratio", float(y_train_full.mean()))
+                mlflow.log_metric("global_positive_ratio", float(target.mean()))
+                mlflow.log_param("n_folds", n_folds)
                 mlflow.log_param("early_stopping_rounds", early_stopping_rounds)
                 mlflow.log_param("threshold_recall_target", threshold_recall_target)
 
-            model.fit(X_train_processed, y_train, **fit_kwargs)
-            if log_to_mlflow and hasattr(model, "best_iteration") and model.best_iteration is not None:
-                mlflow.log_metric("best_iteration", float(model.best_iteration))
+            # 10-fold cross-validation
+            skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+            
+            cv_metrics = {
+                "avg_precision": [],
+                "roc_auc": [],
+                "precision": [],
+                "recall": [],
+                "f1": [],
+                "decision_threshold": [],
+                "threshold_precision_at_target": [],
+                "threshold_recall_at_target": [],
+                "best_iteration": [],
+            }
 
-            y_proba = pipeline.predict_proba(X_test)[:, 1]
-            y_pred = (y_proba >= 0.5).astype(int)
-            avg_precision = float(average_precision_score(y_test, y_proba))
-            roc_auc = float(roc_auc_score(y_test, y_proba))
+            logger.info("Starting %d-fold cross-validation...", n_folds)
+            for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X_train_full, y_train_full), 1):
+                logger.info("Processing fold %d/%d", fold_idx, n_folds)
+                X_train_fold = X_train_full.iloc[train_idx]
+                X_val_fold = X_train_full.iloc[val_idx]
+                y_train_fold = y_train_full.iloc[train_idx]
+                y_val_fold = y_train_full.iloc[val_idx]
 
-            decision_threshold = 0.5
-            decision_threshold_precision = None
-            decision_threshold_recall = None
-            if X_val_processed is not None:
-                val_proba = model.predict_proba(X_val_processed)[:, 1]
-                precisions, recalls, thresholds = precision_recall_curve(y_val, val_proba)
+                # Fit preprocessor on fold training data
+                preprocessor_fold = self._build_feature_pipeline()
+                preprocessor_fold.fit(X_train_fold)
+                X_train_fold_processed = preprocessor_fold.transform(X_train_fold)
+                X_val_fold_processed = preprocessor_fold.transform(X_val_fold)
+
+                # Calculate scale_pos_weight for this fold
+                fraud_ratio_fold = y_train_fold.mean()
+                fold_params = params.copy()
+                if fraud_ratio_fold > 0:
+                    fold_params["scale_pos_weight"] = max(fold_params.get("scale_pos_weight", 1), 
+                                                          (1 - fraud_ratio_fold) / fraud_ratio_fold)
+                else:
+                    fold_params["scale_pos_weight"] = fold_params.get("scale_pos_weight", 1)
+
+                # Create model for this fold
+                model_fold = XGBClassifier(random_state=seed + fold_idx, **fold_params)
+
+                # Set up early stopping
+                fit_kwargs = {}
+                if early_stopping_rounds > 0:
+                    fit_kwargs["eval_set"] = [(X_val_fold_processed, y_val_fold)]
+                    fit_kwargs["verbose"] = False
+                    try:
+                        model_fold.set_params(early_stopping_rounds=early_stopping_rounds)
+                    except ValueError as exc:
+                        logger.warning("Early stopping unsupported by installed XGBoost: %s", exc)
+
+                # Train model on fold training data
+                model_fold.fit(X_train_fold_processed, y_train_fold, **fit_kwargs)
+                
+                # Record best iteration if available
+                if hasattr(model_fold, "best_iteration") and model_fold.best_iteration is not None:
+                    cv_metrics["best_iteration"].append(float(model_fold.best_iteration))
+
+                # Predict on fold validation data
+                val_proba = model_fold.predict_proba(X_val_fold_processed)[:, 1]
+
+                # Find optimal threshold on validation set
+                decision_threshold = 0.5
+                decision_threshold_precision = None
+                decision_threshold_recall = None
+                precisions, recalls, thresholds = precision_recall_curve(y_val_fold, val_proba)
                 if len(thresholds) > 0:
                     precisions = precisions[:-1]
                     recalls = recalls[:-1]
@@ -369,25 +382,118 @@ class XGBoostFraudTrainer:
                         decision_threshold = float(thresholds[best_index])
                         decision_threshold_precision = float(precisions[best_index])
                         decision_threshold_recall = float(recalls[best_index])
-                decision_threshold = float(decision_threshold)
 
+                # Evaluate on fold validation data
+                y_pred_fold = (val_proba >= decision_threshold).astype(int)
+                cv_metrics["avg_precision"].append(float(average_precision_score(y_val_fold, val_proba)))
+                cv_metrics["roc_auc"].append(float(roc_auc_score(y_val_fold, val_proba)))
+                cv_metrics["precision"].append(float(precision_score(y_val_fold, y_pred_fold, zero_division=0)))
+                cv_metrics["recall"].append(float(recall_score(y_val_fold, y_pred_fold, zero_division=0)))
+                cv_metrics["f1"].append(float(f1_score(y_val_fold, y_pred_fold, zero_division=0)))
+                cv_metrics["decision_threshold"].append(float(decision_threshold))
+                if decision_threshold_precision is not None:
+                    cv_metrics["threshold_precision_at_target"].append(float(decision_threshold_precision))
+                if decision_threshold_recall is not None:
+                    cv_metrics["threshold_recall_at_target"].append(float(decision_threshold_recall))
+
+                logger.info("Fold %d: F1=%.4f, Precision=%.4f, Recall=%.4f, ROC-AUC=%.4f",
+                           fold_idx, cv_metrics["f1"][-1], cv_metrics["precision"][-1],
+                           cv_metrics["recall"][-1], cv_metrics["roc_auc"][-1])
+
+            # Calculate mean metrics across folds
             metrics = {
-                "avg_precision": avg_precision,
-                "roc_auc": roc_auc,
-                "precision": float(precision_score(y_test, y_pred, zero_division=0)),
-                "recall": float(recall_score(y_test, y_pred, zero_division=0)),
-                "f1": float(f1_score(y_test, y_pred, zero_division=0)),
+                "cv_avg_precision_mean": float(np.mean(cv_metrics["avg_precision"])),
+                "cv_avg_precision_std": float(np.std(cv_metrics["avg_precision"])),
+                "cv_roc_auc_mean": float(np.mean(cv_metrics["roc_auc"])),
+                "cv_roc_auc_std": float(np.std(cv_metrics["roc_auc"])),
+                "cv_precision_mean": float(np.mean(cv_metrics["precision"])),
+                "cv_precision_std": float(np.std(cv_metrics["precision"])),
+                "cv_recall_mean": float(np.mean(cv_metrics["recall"])),
+                "cv_recall_std": float(np.std(cv_metrics["recall"])),
+                "cv_f1_mean": float(np.mean(cv_metrics["f1"])),
+                "cv_f1_std": float(np.std(cv_metrics["f1"])),
+                "cv_decision_threshold_mean": float(np.mean(cv_metrics["decision_threshold"])),
             }
-            metrics["decision_threshold"] = float(decision_threshold)
-            if decision_threshold_precision is not None:
-                metrics["threshold_precision_at_target"] = float(decision_threshold_precision)
-            if decision_threshold_recall is not None:
-                metrics["threshold_recall_at_target"] = float(decision_threshold_recall)
+            
+            if cv_metrics["threshold_precision_at_target"]:
+                metrics["cv_threshold_precision_at_target_mean"] = float(np.mean(cv_metrics["threshold_precision_at_target"]))
+            if cv_metrics["threshold_recall_at_target"]:
+                metrics["cv_threshold_recall_at_target_mean"] = float(np.mean(cv_metrics["threshold_recall_at_target"]))
+            if cv_metrics["best_iteration"]:
+                metrics["cv_best_iteration_mean"] = float(np.mean(cv_metrics["best_iteration"]))
+
+            logger.info("Cross-validation completed. Mean F1=%.4f±%.4f, Mean Precision=%.4f±%.4f, Mean Recall=%.4f±%.4f",
+                       metrics["cv_f1_mean"], metrics["cv_f1_std"],
+                       metrics["cv_precision_mean"], metrics["cv_precision_std"],
+                       metrics["cv_recall_mean"], metrics["cv_recall_std"])
+
+            # Train final model on all training data for persistence
+            logger.info("Training final model on all training data...")
+            preprocessor.fit(X_train_full)
+            X_train_full_processed = preprocessor.transform(X_train_full)
+            
+            fraud_ratio = y_train_full.mean()
+            final_params = params.copy()
+            if fraud_ratio > 0:
+                final_params["scale_pos_weight"] = max(final_params.get("scale_pos_weight", 1), 
+                                                       (1 - fraud_ratio) / fraud_ratio)
+            else:
+                final_params["scale_pos_weight"] = final_params.get("scale_pos_weight", 1)
+
+            final_model = XGBClassifier(random_state=seed, **final_params)
+            pipeline = Pipeline(
+                steps=[
+                    ("preprocessor", preprocessor),
+                    ("classifier", final_model),
+                ]
+            )
+            
+            # Use early stopping with a validation set created from training data
+            final_fit_kwargs = {}
+            if early_stopping_rounds > 0:
+                # Create a small validation set from training data for early stopping
+                X_train_final, X_val_final, y_train_final, y_val_final = train_test_split(
+                    X_train_full_processed,
+                    y_train_full,
+                    test_size=0.1,
+                    stratify=y_train_full,
+                    random_state=seed,
+                )
+                final_fit_kwargs["eval_set"] = [(X_val_final, y_val_final)]
+                final_fit_kwargs["verbose"] = False
+                try:
+                    final_model.set_params(early_stopping_rounds=early_stopping_rounds)
+                except ValueError as exc:
+                    logger.warning("Early stopping unsupported by installed XGBoost: %s", exc)
+                final_model.fit(X_train_final, y_train_final, **final_fit_kwargs)
+                if log_to_mlflow and hasattr(final_model, "best_iteration") and final_model.best_iteration is not None:
+                    mlflow.log_metric("best_iteration", float(final_model.best_iteration))
+            else:
+                final_model.fit(X_train_full_processed, y_train_full)
+
+            # Evaluate final model on test set
+            test_proba = pipeline.predict_proba(X_test)[:, 1]
+            final_decision_threshold = metrics["cv_decision_threshold_mean"]
+            test_pred = (test_proba >= final_decision_threshold).astype(int)
+            
+            test_metrics = {
+                "test_avg_precision": float(average_precision_score(y_test, test_proba)),
+                "test_roc_auc": float(roc_auc_score(y_test, test_proba)),
+                "test_precision": float(precision_score(y_test, test_pred, zero_division=0)),
+                "test_recall": float(recall_score(y_test, test_pred, zero_division=0)),
+                "test_f1": float(f1_score(y_test, test_pred, zero_division=0)),
+            }
+            metrics.update(test_metrics)
+            metrics["decision_threshold"] = final_decision_threshold
+
+            logger.info("Final test set evaluation: F1=%.4f, Precision=%.4f, Recall=%.4f, ROC-AUC=%.4f",
+                       test_metrics["test_f1"], test_metrics["test_precision"],
+                       test_metrics["test_recall"], test_metrics["test_roc_auc"])
 
             if log_to_mlflow:
                 mlflow.log_metrics(metrics)
 
-                signature = infer_signature(X_train, pipeline.predict_proba(X_train)[:, 1])
+                signature = infer_signature(X_train_full, pipeline.predict_proba(X_train_full)[:, 1])
                 log_model_kwargs = {
                     "sk_model": pipeline,
                     "artifact_path": "model",
