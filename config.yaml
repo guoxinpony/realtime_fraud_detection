@@ -156,14 +156,17 @@ models:
   mlp:
     seed: 666
     params:
-      hidden_layer_sizes: [128, 64]
+      hidden_layer_sizes: [256, 128， 64]
       activation: "relu"
       solver: "adam"
-      alpha: 0.0001
+      alpha: 0.0003
       learning_rate: "adaptive"
-      learning_rate_init: 0.001
-      max_iter: 200
+      learning_rate_init: 0.0008
+      max_iter: 150
       batch_size: 256
+      early_stopping: true
+      n_iter_no_change: 12
+      tol: 0.0002
       random_state: 666
     path: "/app/models/fraud_detection_model_mlp.pkl"
     mlflow_registered_model_name: "fraud_detection_mlp"
