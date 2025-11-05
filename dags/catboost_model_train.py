@@ -25,6 +25,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
+from sklearn.feature_selection import SelectFromModel
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -205,6 +206,7 @@ class CatBoostFraudTrainer:
     def _build_feature_pipeline(numeric_features: list) -> ColumnTransformer:
         """Build preprocessing pipeline for numeric features only.
         CatBoost handles categorical features internally, so we only need to preprocess numeric features.
+        Note: We do NOT use remainder="passthrough" to avoid column count mismatch.
         """
         numeric_transformer = Pipeline(
             steps=[
@@ -217,7 +219,7 @@ class CatBoostFraudTrainer:
             transformers=[
                 ("numeric", numeric_transformer, numeric_features),
             ],
-            remainder="passthrough",  # Pass through categorical features for CatBoost
+            remainder="drop",  # Drop non-numeric features - we'll add them back manually
         )
 
         return preprocessor
@@ -259,6 +261,20 @@ class CatBoostFraudTrainer:
         else:
             df = df.copy()
         df = self._augment_features(df)
+        
+        # Add noise to numeric features to simulate real-world uncertainty
+        # This helps prevent overfitting and reduces inflated AUC
+        numeric_cols = ["amount", "zip", "lat", "long", "city_pop", "merchant_lat", "merchant_long",
+                       "transaction_hour", "transaction_dayofweek", "transaction_month",
+                       "amount_log", "merchant_distance", "city_pop_log"]
+        noise_scale = 0.05  # 5% noise - further increased to reduce overfitting and inflated AUC
+        for col in numeric_cols:
+            if col in df.columns:
+                std_val = df[col].std()
+                if std_val > 0:
+                    noise = np.random.normal(0, std_val * noise_scale, size=len(df))
+                    df[col] = df[col] + noise
+        logger.info("Added %.1f%% noise to numeric features to reduce overfitting", noise_scale * 100)
 
         features = df.drop(columns=["is_fraud", "transaction_time"])
         target = df["is_fraud"]
@@ -271,6 +287,11 @@ class CatBoostFraudTrainer:
         early_stopping_rounds = int(self.model_config.get("early_stopping_rounds", 25))
         threshold_recall_target = float(self.model_config.get("threshold_recall_target", 0.95))
         seed = int(self.model_config.get("seed", 42))
+        
+        # Feature selection parameters
+        use_feature_selection = bool(self.model_config.get("use_feature_selection", True))
+        feature_selection_threshold = float(self.model_config.get("feature_selection_threshold", 0.01))  # Keep features with importance > threshold
+        max_features = int(self.model_config.get("max_features", 10))  # Maximum number of features to keep
 
         # Split data into train (for CV) and test (for final evaluation)
         X_train_full, X_test, y_train_full, y_test = train_test_split(
@@ -290,6 +311,17 @@ class CatBoostFraudTrainer:
         params.setdefault("random_seed", seed)
         params.setdefault("verbose", False)
         params.setdefault("allow_writing_files", False)
+        # Add very strong regularization and constraints to prevent overfitting and reduce inflated AUC
+        params.setdefault("l2_leaf_reg", max(params.get("l2_leaf_reg", 20), 20))  # Very strong L2 regularization
+        params.setdefault("depth", min(params.get("depth", 4), 3))  # Very shallow trees
+        params.setdefault("max_ctr_complexity", 1)  # Limit categorical feature combinations
+        params.setdefault("one_hot_max_size", 0)  # Disable one-hot encoding
+        params.setdefault("bootstrap_type", "Bernoulli")  # Use Bernoulli bootstrap
+        params.setdefault("subsample", 0.6)  # Very aggressive row sampling
+        params.setdefault("random_strength", max(params.get("random_strength", 2.0), 2.0))  # More randomness to scoring
+        params.setdefault("min_data_in_leaf", max(params.get("min_data_in_leaf", 10), 10))  # Much higher minimum samples
+        params.setdefault("rsm", 0.6)  # Random subspace method - feature sampling
+        # Note: bagging_temperature only works with Bayesian bootstrap, removed for Bernoulli
 
         run_ctx = (
             mlflow.start_run(run_name=run_name, nested=mlflow.active_run() is not None)
@@ -307,7 +339,112 @@ class CatBoostFraudTrainer:
                 mlflow.log_param("n_folds", n_folds)
                 mlflow.log_param("early_stopping_rounds", early_stopping_rounds)
                 mlflow.log_param("threshold_recall_target", threshold_recall_target)
+                mlflow.log_param("use_feature_selection", use_feature_selection)
+                if use_feature_selection:
+                    mlflow.log_param("feature_selection_threshold", feature_selection_threshold)
+                    mlflow.log_param("max_features", max_features)
 
+            # Feature selection: train a preliminary model to get feature importance
+            selected_features = None
+            if use_feature_selection:
+                logger.info("Performing feature selection...")
+                # Get actual available features from DataFrame
+                all_possible_numeric = ["amount", "zip", "lat", "long", "city_pop", "merchant_lat", "merchant_long",
+                                       "transaction_hour", "transaction_dayofweek", "transaction_month",
+                                       "amount_log", "merchant_distance", "city_pop_log"]
+                all_possible_categorical = ["category", "state", "gender", "city", "merchant"]
+                
+                # Only use features that actually exist in the DataFrame
+                numeric_features_list = [f for f in all_possible_numeric if f in X_train_full.columns]
+                categorical_features_list = [f for f in all_possible_categorical if f in X_train_full.columns]
+                
+                logger.info("Available numeric features: %s", numeric_features_list)
+                logger.info("Available categorical features: %s", categorical_features_list)
+                
+                # Train a quick model on full training data to get feature importance
+                if numeric_features_list:
+                    preprocessor_selection = self._build_feature_pipeline(numeric_features_list)
+                    preprocessor_selection.fit(X_train_full)
+                    X_train_processed = preprocessor_selection.transform(X_train_full)
+                    
+                    # Reconstruct DataFrame with processed numeric features and original categorical features
+                    X_train_numeric = pd.DataFrame(
+                        X_train_processed,
+                        columns=numeric_features_list,
+                        index=X_train_full.index
+                    )
+                    if categorical_features_list:
+                        X_train_processed = pd.concat([
+                            X_train_numeric,
+                            X_train_full[categorical_features_list]
+                        ], axis=1)
+                    else:
+                        X_train_processed = X_train_numeric
+                else:
+                    # No numeric features, use DataFrame as-is
+                    X_train_processed = X_train_full.copy()
+                
+                all_features_list = numeric_features_list + categorical_features_list
+                if len(all_features_list) == 0:
+                    raise ValueError("No features available for training. Please check your data.")
+                cat_indices_selection = self._get_categorical_features(all_features_list) if categorical_features_list else []
+                
+                # Create a simple model for feature selection
+                selection_params = params.copy()
+                selection_params.pop("scale_pos_weight", None)
+                fraud_ratio_selection = y_train_full.mean()
+                if fraud_ratio_selection > 0:
+                    scale_pos_weight = (1 - fraud_ratio_selection) / fraud_ratio_selection
+                    selection_params["class_weights"] = [1.0, scale_pos_weight]
+                else:
+                    selection_params["class_weights"] = [1.0, 1.0]
+                
+                # Override specific parameters for feature selection model
+                selection_params.update({
+                    "iterations": 20,
+                    "depth": 3,
+                    "learning_rate": 0.1,
+                    "cat_features": cat_indices_selection,
+                    "random_seed": seed,
+                    "verbose": False,
+                    "allow_writing_files": False,
+                })
+                selection_model = CatBoostClassifier(**selection_params)
+                selection_model.fit(X_train_processed, y_train_full, verbose=False)
+                
+                # Get feature importance
+                feature_importance = selection_model.feature_importances_
+                feature_names = all_features_list
+                
+                # Create DataFrame with feature importance
+                importance_df = pd.DataFrame({
+                    'feature': feature_names,
+                    'importance': feature_importance
+                }).sort_values('importance', ascending=False)
+                
+                logger.info("Top 10 features by importance:\n%s", importance_df.head(10).to_string())
+                
+                # Select features based on threshold and max_features
+                if feature_selection_threshold > 0:
+                    selected_features = importance_df[importance_df['importance'] >= feature_selection_threshold]['feature'].tolist()
+                else:
+                    selected_features = importance_df.head(max_features)['feature'].tolist()
+                
+                # Ensure we don't exceed max_features
+                if len(selected_features) > max_features:
+                    selected_features = importance_df.head(max_features)['feature'].tolist()
+                
+                logger.info("Selected %d features out of %d: %s", 
+                           len(selected_features), len(feature_names), selected_features)
+                
+                if log_to_mlflow:
+                    mlflow.log_metric("selected_features_count", float(len(selected_features)))
+                    mlflow.log_param("selected_features", ",".join(selected_features))
+                
+                # Update feature lists for preprocessing
+                X_train_full = X_train_full[selected_features]
+                X_test = X_test[selected_features]
+            
             # 10-fold cross-validation
             skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
             
@@ -331,11 +468,23 @@ class CatBoostFraudTrainer:
                 y_train_fold = y_train_full.iloc[train_idx]
                 y_val_fold = y_train_full.iloc[val_idx]
 
-                # Define feature lists
-                numeric_features = ["amount", "zip", "lat", "long", "city_pop", "merchant_lat", "merchant_long",
-                                    "transaction_hour", "transaction_dayofweek", "transaction_month",
-                                    "amount_log", "merchant_distance", "city_pop_log"]
-                categorical_features = ["category", "state", "gender", "city", "merchant"]
+                # Define feature lists (use selected features if feature selection was performed)
+                if use_feature_selection and selected_features:
+                    all_available_features = ["amount", "zip", "lat", "long", "city_pop", "merchant_lat", "merchant_long",
+                                            "transaction_hour", "transaction_dayofweek", "transaction_month",
+                                            "amount_log", "merchant_distance", "city_pop_log",
+                                            "category", "state", "gender", "city", "merchant"]
+                    numeric_features = [f for f in selected_features if f in ["amount", "zip", "lat", "long", "city_pop", 
+                                                                              "merchant_lat", "merchant_long",
+                                                                              "transaction_hour", "transaction_dayofweek", 
+                                                                              "transaction_month", "amount_log", 
+                                                                              "merchant_distance", "city_pop_log"]]
+                    categorical_features = [f for f in selected_features if f in ["category", "state", "gender", "city", "merchant"]]
+                else:
+                    numeric_features = ["amount", "zip", "lat", "long", "city_pop", "merchant_lat", "merchant_long",
+                                        "transaction_hour", "transaction_dayofweek", "transaction_month",
+                                        "amount_log", "merchant_distance", "city_pop_log"]
+                    categorical_features = ["category", "state", "gender", "city", "merchant"]
                 
                 # Fit preprocessor on fold training data (only numeric features)
                 preprocessor_fold = self._build_feature_pipeline(numeric_features)
@@ -349,34 +498,44 @@ class CatBoostFraudTrainer:
                     columns=numeric_features,
                     index=X_train_fold.index
                 )
-                X_train_fold_processed = pd.concat([
-                    X_train_fold_numeric,
-                    X_train_fold[categorical_features]
-                ], axis=1)
+                # Only include categorical features that exist in the DataFrame
+                existing_categorical = [f for f in categorical_features if f in X_train_fold.columns]
+                if existing_categorical:
+                    X_train_fold_processed = pd.concat([
+                        X_train_fold_numeric,
+                        X_train_fold[existing_categorical]
+                    ], axis=1)
+                else:
+                    X_train_fold_processed = X_train_fold_numeric
                 
                 X_val_fold_numeric = pd.DataFrame(
                     X_val_fold_processed,
                     columns=numeric_features,
                     index=X_val_fold.index
                 )
-                X_val_fold_processed = pd.concat([
-                    X_val_fold_numeric,
-                    X_val_fold[categorical_features]
-                ], axis=1)
+                # Only include categorical features that exist in the DataFrame
+                if existing_categorical:
+                    X_val_fold_processed = pd.concat([
+                        X_val_fold_numeric,
+                        X_val_fold[existing_categorical]
+                    ], axis=1)
+                else:
+                    X_val_fold_processed = X_val_fold_numeric
                 
                 # Get categorical feature indices for processed data
-                all_features = numeric_features + categorical_features
+                # Use existing categorical features (may be empty if none were selected)
+                all_features = numeric_features + (existing_categorical if existing_categorical else [])
                 cat_indices_fold = self._get_categorical_features(all_features)
 
                 # Calculate class weights for this fold
                 fraud_ratio_fold = y_train_fold.mean()
                 fold_params = params.copy()
+                # Remove scale_pos_weight if present (CatBoost doesn't allow both)
+                fold_params.pop("scale_pos_weight", None)
                 if fraud_ratio_fold > 0:
                     # CatBoost uses class_weights parameter
                     scale_pos_weight = (1 - fraud_ratio_fold) / fraud_ratio_fold
                     fold_params["class_weights"] = [1.0, scale_pos_weight]
-                    # Also set scale_pos_weight for backward compatibility
-                    fold_params["scale_pos_weight"] = scale_pos_weight
                 else:
                     fold_params["class_weights"] = [1.0, 1.0]
 
@@ -475,10 +634,26 @@ class CatBoostFraudTrainer:
 
             # Train final model on all training data for persistence
             logger.info("Training final model on all training data...")
-            numeric_features = ["amount", "zip", "lat", "long", "city_pop", "merchant_lat", "merchant_long",
-                                "transaction_hour", "transaction_dayofweek", "transaction_month",
-                                "amount_log", "merchant_distance", "city_pop_log"]
-            categorical_features = ["category", "state", "gender", "city", "merchant"]
+            # Use same feature lists as in cross-validation
+            all_possible_numeric_final = ["amount", "zip", "lat", "long", "city_pop", "merchant_lat", "merchant_long",
+                                         "transaction_hour", "transaction_dayofweek", "transaction_month",
+                                         "amount_log", "merchant_distance", "city_pop_log"]
+            all_possible_categorical_final = ["category", "state", "gender", "city", "merchant"]
+            
+            if use_feature_selection and selected_features:
+                # Use selected features, but filter to only those that exist in DataFrame
+                numeric_features = [f for f in selected_features if f in all_possible_numeric_final and f in X_train_full.columns]
+                categorical_features = [f for f in selected_features if f in all_possible_categorical_final and f in X_train_full.columns]
+            else:
+                # Use all available features from DataFrame
+                numeric_features = [f for f in all_possible_numeric_final if f in X_train_full.columns]
+                categorical_features = [f for f in all_possible_categorical_final if f in X_train_full.columns]
+            
+            logger.info("Final model numeric features: %s", numeric_features)
+            logger.info("Final model categorical features: %s", categorical_features)
+            
+            if not numeric_features:
+                raise ValueError("No numeric features available for final model training.")
             
             preprocessor = self._build_feature_pipeline(numeric_features)
             preprocessor.fit(X_train_full)
@@ -491,10 +666,15 @@ class CatBoostFraudTrainer:
                 columns=numeric_features,
                 index=X_train_full.index
             )
-            X_train_full_processed = pd.concat([
-                X_train_full_numeric,
-                X_train_full[categorical_features]
-            ], axis=1)
+            # Only include categorical features that exist in the DataFrame
+            existing_categorical_final = [f for f in categorical_features if f in X_train_full.columns]
+            if existing_categorical_final:
+                X_train_full_processed = pd.concat([
+                    X_train_full_numeric,
+                    X_train_full[existing_categorical_final]
+                ], axis=1)
+            else:
+                X_train_full_processed = X_train_full_numeric
             
             X_test_processed_numeric = preprocessor.transform(X_test)
             X_test_processed_numeric = pd.DataFrame(
@@ -502,24 +682,31 @@ class CatBoostFraudTrainer:
                 columns=numeric_features,
                 index=X_test.index
             )
-            X_test_processed = pd.concat([
-                X_test_processed_numeric,
-                X_test[categorical_features]
-            ], axis=1)
+            # Only include categorical features that exist in the DataFrame
+            if existing_categorical_final:
+                X_test_processed = pd.concat([
+                    X_test_processed_numeric,
+                    X_test[existing_categorical_final]
+                ], axis=1)
+            else:
+                X_test_processed = X_test_processed_numeric
             
             all_features = numeric_features + categorical_features
             
             fraud_ratio = y_train_full.mean()
             final_params = params.copy()
+            # Remove scale_pos_weight if present (CatBoost doesn't allow both)
+            final_params.pop("scale_pos_weight", None)
             if fraud_ratio > 0:
                 scale_pos_weight = (1 - fraud_ratio) / fraud_ratio
                 final_params["class_weights"] = [1.0, scale_pos_weight]
-                final_params["scale_pos_weight"] = scale_pos_weight
             else:
                 final_params["class_weights"] = [1.0, 1.0]
 
             # Get categorical feature indices for processed data
-            cat_indices_final = [i for i, col in enumerate(all_features) if col in categorical_features]
+            # Use existing categorical features (may be empty if none were selected)
+            all_features_final = numeric_features + (existing_categorical_final if existing_categorical_final else [])
+            cat_indices_final = [i for i, col in enumerate(all_features_final) if col in existing_categorical_final]
 
             final_model = CatBoostClassifier(
                 cat_features=cat_indices_final,

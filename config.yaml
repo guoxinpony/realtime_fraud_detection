@@ -15,7 +15,7 @@ kafka:
   output_topic: "fraud_predictions"
   security_protocol: 'PLAINTEXT'
   timeout: 12000
-  max_messages: 20000
+  max_messages: 50000
 
 data:
   training_csv: "./data/fraud_detection_data.csv"
@@ -28,14 +28,22 @@ models:
     early_stopping_rounds: 25
     threshold_recall_target: 0.9
     seed: 666
+    use_feature_selection: true  # Enable feature selection
+    feature_selection_threshold: 0.01  # Keep features with importance >= threshold
+    max_features: 10  # Maximum number of features to keep
     params:
-      n_estimators: 200
-      learning_rate: 0.08
-      max_depth: 4
-      subsample: 0.85
-      colsample_bytree: 0.8
+      n_estimators: 50  # Further reduced - simpler model
+      learning_rate: 0.03  # Further reduced - slower learning
+      max_depth: 2  # Very shallow trees to prevent overfitting
+      subsample: 0.6  # More aggressive row sampling
+      colsample_bytree: 0.6  # More aggressive column sampling
+      colsample_bylevel: 0.6  # Additional column sampling per level
+      min_child_weight: 10  # Much stronger constraint
+      reg_alpha: 5.0  # Strong L1 regularization
+      reg_lambda: 5.0  # Strong L2 regularization
+      gamma: 1.0  # Higher minimum loss reduction
       tree_method: "hist"
-      scale_pos_weight: 132.33
+      scale_pos_weight: 10
     path: "/app/models/fraud_detection_model_xgboost.pkl"
     test_path: "/app/models/fraud_detection_model_TEST.pkl"
     mlflow_registered_model_name: "fraud_detection_xgboost"
@@ -61,17 +69,104 @@ models:
     early_stopping_rounds: 25
     threshold_recall_target: 0.9
     seed: 666
+    use_feature_selection: true  # Enable feature selection
+    feature_selection_threshold: 0.01  # Keep features with importance >= threshold
+    max_features: 10  # Maximum number of features to keep
     params:
-      iterations: 200
-      learning_rate: 0.08
-      depth: 6
-      l2_leaf_reg: 3
+      iterations: 50  # Further reduced - simpler model
+      learning_rate: 0.03  # Further reduced - slower learning
+      depth: 3  # Very shallow trees to prevent overfitting
+      l2_leaf_reg: 20  # Much stronger L2 regularization
       loss_function: "Logloss"
       eval_metric: "PRAUC"
       task_type: "CPU"
+      subsample: 0.6  # More aggressive row sampling
+      random_strength: 2.0  # More randomness to scoring
+      min_data_in_leaf: 10  # Much higher minimum samples in leaf
+      rsm: 0.6  # Random subspace method - feature sampling
     path: "/app/models/fraud_detection_model_catboost.pkl"
     test_path: "/app/models/fraud_detection_model_catboost_TEST.pkl"
     mlflow_registered_model_name: "fraud_detection_catboost"
+  random_forest:
+    test_size: 0.2
+    seed: 666
+    params:
+      n_estimators: 300
+      max_depth: null
+      min_samples_split: 2
+      min_samples_leaf: 1
+      max_features: "sqrt"
+    path: "/app/models/fraud_detection_model_random_forest.pkl"
+    mlflow_registered_model_name: "fraud_detection_random_forest"
+  lightgbm:
+    test_size: 0.2
+    seed: 666
+    max_messages: 5000
+    params:
+      n_estimators: 300
+      learning_rate: 0.05
+      num_leaves: 31
+      max_depth: -1
+      subsample: 0.8
+      colsample_bytree: 0.8
+    path: "/app/models/fraud_detection_model_lightgbm.pkl"
+    mlflow_registered_model_name: "fraud_detection_lightgbm"
+  tabnet:
+    test_size: 0.2
+    seed: 666
+    params:
+      learning_rate: 0.05
+      max_iter: 200
+      max_leaf_nodes: 31
+      max_depth: null
+      min_samples_leaf: 20
+      l2_regularization: 0.0
+      early_stopping: true
+    path: "/app/models/fraud_detection_model_tabnet.pkl"
+    mlflow_registered_model_name: "fraud_detection_tabnet"
+  decision_tree:
+    test_size: 0.2
+    seed: 666
+    params:
+      criterion: "gini"
+      splitter: "best"
+      max_depth: 10
+      min_samples_split: 2
+      min_samples_leaf: 1
+      class_weight: "balanced"
+      random_state: 666
+    path: "/app/models/fraud_detection_model_decision_tree.pkl"
+    mlflow_registered_model_name: "fraud_detection_decision_tree"
+  extra_tree:
+    test_size: 0.2
+    seed: 666
+    params:
+      n_estimators: 100
+      criterion: "gini"
+      max_depth: 15
+      min_samples_split: 2
+      min_samples_leaf: 1
+      max_features: "sqrt"
+      bootstrap: false
+      class_weight: "balanced"
+      random_state: 666
+      n_jobs: -1
+    path: "/app/models/fraud_detection_model_extra_tree.pkl"
+    mlflow_registered_model_name: "fraud_detection_extra_tree"
+  mlp:
+    seed: 666
+    params:
+      hidden_layer_sizes: [128, 64]
+      activation: "relu"
+      solver: "adam"
+      alpha: 0.0001
+      learning_rate: "adaptive"
+      learning_rate_init: 0.001
+      max_iter: 200
+      batch_size: 256
+      random_state: 666
+    path: "/app/models/fraud_detection_model_mlp.pkl"
+    mlflow_registered_model_name: "fraud_detection_mlp"
 
 
 

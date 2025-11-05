@@ -9,6 +9,8 @@ COPY entrypoint.sh /bootstrap.sh
 RUN chmod +x /bootstrap.sh
 RUN mkdir -p /app/models
 
+RUN apt-get update && apt-get install -y libgomp1
+
 # Switch back to the airflow user and install the Python package in user space
 USER airflow
 # Debian/Bookworm's pip needs to allow "non-virtual environment installation"
