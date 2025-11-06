@@ -371,6 +371,7 @@ services:
       - kafka_broker
     volumes:
       - ./data:/data:ro
+      - ./producer/main2.py:/app/main2.py
     command:
       - "--file"
       - "/data/fraud_detection_data.csv"

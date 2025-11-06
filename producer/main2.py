@@ -3,6 +3,7 @@ import csv
 import json
 import logging
 import os
+import random
 import signal
 import sys
 import time
@@ -139,6 +140,23 @@ class DatasetProducer:
         except Exception as exc:
             logger.error("Failed to publish record %s: %s", record.get("transaction_id"), exc)
 
+    def _reservoir_sampling(self, reader, sample_size: int) -> list:
+        """
+        Reservoir sampling algorithm: randomly sample k items from a stream
+        without knowing the total size in advance. Memory efficient.
+        """
+        reservoir = []
+        for index, row in enumerate(reader):
+            if index < sample_size:
+                # Fill reservoir with first k items
+                reservoir.append((index, row))
+            else:
+                # Randomly replace items in reservoir
+                j = random.randint(0, index)
+                if j < sample_size:
+                    reservoir[j] = (index, row)
+        return reservoir
+
     def run(self) -> None:
         if not os.path.exists(self.file_path):
             logger.error("CSV file not found: %s", self.file_path)
@@ -146,27 +164,46 @@ class DatasetProducer:
 
         self.running = True
         sent = 0
-        logger.info("Starting dataset streaming from %s", self.file_path)
+        logger.info("Starting dataset streaming from %s (random selection mode)", self.file_path)
 
+        # Determine sample size: use limit if specified, otherwise use a reasonable default
+        # Default to 10000 rows to avoid excessive memory usage
+        DEFAULT_MAX_ROWS = 10000
+        sample_size = self.limit if self.limit else DEFAULT_MAX_ROWS
+
+        # Use reservoir sampling for memory-efficient random selection
+        # This algorithm only keeps sample_size rows in memory, regardless of file size
         with open(self.file_path, "r", newline="", encoding="utf-8") as csvfile:
             reader = csv.DictReader(csvfile)
-            for index, row in enumerate(reader):
-                if not self.running:
-                    break
+            selected_rows = self._reservoir_sampling(reader, sample_size)
+        
+        if self.limit:
+            # If limit was specified, we already have exactly that many rows
+            logger.info("Randomly selected %d rows using reservoir sampling (memory efficient)", len(selected_rows))
+        else:
+            # If no limit, shuffle the selected rows for additional randomness
+            random.shuffle(selected_rows)
+            logger.info("Randomly selected and shuffled %d rows (max %d, memory efficient)", 
+                       len(selected_rows), DEFAULT_MAX_ROWS)
 
-                record = self._transform_row(row, index)
-                if not record:
-                    continue
+        if not selected_rows:
+            logger.error("No data rows found in CSV file")
+            sys.exit(1)
 
-                self._publish(record)
-                sent += 1
+        # Send selected rows
+        for index, row in selected_rows:
+            if not self.running:
+                break
 
-                if self.sleep_interval > 0:
-                    time.sleep(self.sleep_interval)
+            record = self._transform_row(row, index)
+            if not record:
+                continue
 
-                if self.limit and sent >= self.limit:
-                    logger.info("Reached message limit: %s", self.limit)
-                    break
+            self._publish(record)
+            sent += 1
+
+            if self.sleep_interval > 0:
+                time.sleep(self.sleep_interval)
 
         self._shutdown()
         logger.info("Dataset streaming completed. Messages sent: %s", sent)
