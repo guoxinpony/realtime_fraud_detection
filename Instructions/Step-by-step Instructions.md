@@ -145,7 +145,7 @@ You should be able to see:
 
 
 
-##### (5) Open http://localhost:9001/ in your browser, Username is minio, password is minio123: 
+##### (6) Open http://localhost:9001/ in your browser, Username is minio, password is minio123: 
 
 ![minio_login](./pic/minio_login.png)
 
@@ -157,7 +157,7 @@ After logging in, you will see:
 
 
 
-##### (6) In Docker Desktop, Open the container named `mc`. 
+##### (7) In Docker Desktop, Open the container named `mc`. 
 
 > [!NOTE]
 >
@@ -314,7 +314,7 @@ In the Airflow home page, you will see a list of DAGs (Directed Acyclic Graphs) 
 You'll find there are now three topics: ml_model_train, fraud_test_data, and fraud_predictions:
 
 - **ml_model_train**: Store data sent by banks or financial institutions for model training
-- **raud_test_data**: Banks or financial institutions send data requiring inference to the fraud detection system
+- **fraud_test_data**: Banks or financial institutions send data requiring inference to the fraud detection system
 - **fraud_predictions**: Inference results from Spark; banks or financial institutions can read the results from this topic
 
 
@@ -393,7 +393,7 @@ docker exec -it kafka_broker rpk topic consume fraud_predictions --num 10
 
 
 
-## (5) Model Selection and Switching:
+## 5. Model Selection and Switching
 
 **Understanding Model Configuration:**
 
@@ -438,6 +438,65 @@ models:
   xgboost:  # Note: The key name stays 'xgboost' but path changes
     path: "/app/models/fraud_detection_model_lightgbm.pkl"
 ```
+
+Or if you want to use a different model section (if available in config.yaml):
+
+```yaml
+models:
+  lightgbm:
+    path: "/app/models/fraud_detection_model_lightgbm.pkl"
+```
+
+> [!NOTE]
+>
+> The inference service reads from `models.xgboost.path` by default. If your config.yaml has different model sections, you may need to update the inference code or ensure the path points to the correct model.
+
+**Step 3: Restart Inference Service**
+
+After updating the configuration:
+
+```bash
+# Restart the inference container to load the new model
+docker compose restart inference
+```
+
+**Step 4: Verify Model Loaded**
+
+1. Check inference container logs:
+   ```bash
+   docker compose logs inference | grep -i "model loaded"
+   ```
+
+2. You should see a message like:
+   ```
+   INFO - Model loaded from /app/models/fraud_detection_model_lightgbm.pkl
+   ```
+
+**Comparing Model Performance:**
+
+Before switching models, you can compare their performance in MLflow:
+
+1. Open MLflow UI: http://localhost:5500/
+2. Navigate to the `fraud_detection` experiment
+3. Compare metrics across different model runs:
+   - ROC-AUC (higher is better)
+   - Precision (higher is better)
+   - Recall (higher is better)
+   - F1-Score (higher is better)
+
+**Model-Specific Considerations:**
+
+- **XGBoost/LightGBM/CatBoost**: Fast inference, good performance, recommended for production
+- **Logistic Regression**: Very fast, interpretable, but may have lower accuracy
+- **MLP/TabNet**: Slower inference, may require more memory
+- **Tree-based models** (Random Forest, Decision Tree, Extra Trees): Good balance of speed and accuracy
+
+**Troubleshooting Model Switching:**
+
+- **Model file not found**: Ensure the model was trained successfully and the file exists
+- **Model loading error**: Check that the model file is not corrupted and matches the inference code version
+- **Inference errors**: Some models may require different feature engineering - verify the model was trained with compatible features
+- **Performance issues**: Different models have different resource requirements - monitor CPU and memory usage
 
 
 
