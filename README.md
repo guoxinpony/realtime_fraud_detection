@@ -2,10 +2,11 @@
 
 A production-ready, end-to-end machine learning system for real-time fraud detection in financial transactions. This project implements a scalable MLOps pipeline that ingests transaction data from Kafka/Redpanda, trains multiple ML models (XGBoost, CatBoost, LightGBM, Logistic Regression, etc.) with rigorous cross-validation and feature engineering, tracks experiments with MLflow, orchestrates workflows with Apache Airflow, and performs distributed real-time inference using Apache Spark Streaming.
 
-![Architecture](archi.png)
+
 
 ## 📋 Table of Contents
 
+- [Useful Links](#-useful-links)
 - [Features](#-features)
 - [Architecture](#-architecture)
 - [Tech Stack](#-tech-stack)
@@ -17,8 +18,17 @@ A production-ready, end-to-end machine learning system for real-time fraud detec
 - [Real-time Inference](#-real-time-inference)
 - [Monitoring](#-monitoring)
 - [Troubleshooting](#-troubleshooting)
-- [Contributing](#-contributing)
 - [License](#-license)
+
+
+
+## 🔗 Useful Links
+
+- **What is Redpanda:** https://github.com/redpanda-data/redpanda
+- **What is Apache  Airflow**: https://github.com/apache/airflow
+- **What is MinIO**: https://github.com/minio/minio
+- **What is MLflow**: https://github.com/mlflow/mlflow
+- **What is Apache Spark**: https://github.com/apache/spark
 
 ## ✨ Features
 
@@ -69,6 +79,8 @@ Transaction Stream → Spark Streaming → Model Inference → Fraud Predictions
 
 ### Key Components
 
+![Architecture](archi.png)
+
 - **Apache Airflow**: Workflow orchestration and scheduling
 - **MLflow**: Experiment tracking and model registry
 - **Apache Spark**: Distributed stream processing for real-time inference
@@ -91,7 +103,6 @@ Transaction Stream → Spark Streaming → Model Inference → Fraud Predictions
 - **CatBoost**: Gradient boosting with categorical support
 - **LightGBM**: Fast gradient boosting
 - **scikit-learn**: Traditional ML algorithms
-- **PyTorch**: Deep learning (for TabNet, MLP)
 
 ### Infrastructure
 - **Docker & Docker Compose**: Containerization
@@ -107,7 +118,7 @@ Before you begin, ensure you have the following installed:
 - **Docker Compose** (version 2.0 or higher)
 - **Git**
 - **At least 8GB RAM** (16GB recommended)
-- **10GB free disk space**
+- **50GB free disk space**
 
 ### System Requirements
 
@@ -417,31 +428,7 @@ If you see `libgomp.so.1: cannot open shared object file`:
 3. **Execute Commands**: `docker-compose exec <service-name> bash`
 4. **Check Network**: `docker network inspect realtime-fraud-detection_default`
 
-## 🤝 Contributing
 
-Contributions are welcome! Please follow these steps:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-### Development Setup
-
-```bash
-# Install development dependencies
-pip install -r requirements-dev.txt
-
-# Run tests
-pytest
-
-# Format code
-black .
-
-# Lint code
-flake8
-```
 
 ## 📄 License
 
