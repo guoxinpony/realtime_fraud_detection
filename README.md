@@ -4,6 +4,10 @@ A production-ready, end-to-end machine learning system for real-time fraud detec
 
 
 
+### RUN the Project: [Step-by-step Instructions](https://github.com/guoxinpony/realtime_fraud_detection/blob/main/Instructions/Step-by-step Instructions.pdf)
+
+
+
 ## 📋 Table of Contents
 
 - [Useful Links](#-useful-links)
