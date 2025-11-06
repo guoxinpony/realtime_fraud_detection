@@ -31,6 +31,10 @@ from pyspark.sql.functions import (
     from_unixtime,
     to_json,
     struct,
+    log1p,
+    sqrt,
+    pow,
+    greatest,
 )
 from pyspark.sql.pandas.functions import pandas_udf  # For Pandas vectorized UDFs
 from pyspark.sql.types import (StructType, StructField, StringType,
@@ -294,6 +298,24 @@ class FraudDetectionInference:
                            when(coalesce(col("transaction_dayofweek"), lit(0)) >= 5, 1).otherwise(0))
         df = df.withColumn("transaction_day", dayofmonth(col("transaction_time")))
 
+        # Additional engineered features matching training pipeline (xgboost_model_train.py)
+        # amount_log: log1p transformation of amount (clipped to >= 0)
+        # Handle NULL values by coalescing to 0 before clipping
+        df = df.withColumn("amount_log", 
+                          log1p(greatest(coalesce(col("amount"), lit(0)), lit(0))))
+        # merchant_distance: Euclidean distance between user and merchant locations
+        # Handle NULL values by setting distance to 0 if any coordinate is NULL
+        df = df.withColumn("merchant_distance", 
+                          coalesce(
+                              sqrt(pow(coalesce(col("lat"), lit(0)) - coalesce(col("merchant_lat"), lit(0)), 2) + 
+                                   pow(coalesce(col("long"), lit(0)) - coalesce(col("merchant_long"), lit(0)), 2)),
+                              lit(0.0)
+                          ))
+        # city_pop_log: log1p transformation of city_pop (clipped to >= 0)
+        # Handle NULL values by coalescing to 0 before clipping
+        df = df.withColumn("city_pop_log", 
+                          log1p(greatest(coalesce(col("city_pop"), lit(0)), lit(0))))
+
         # Transaction pattern features (placeholders - would normally come from historical data)
         # In production, these would be calculated using window functions or join with historical data
         df = df.withColumn("time_since_last_txn", lit(0.0))  # Placeholder value
@@ -332,6 +354,11 @@ class FraudDetectionInference:
         threshold = self.prediction_threshold
 
         # Define prediction UDF using Pandas for vectorized operations
+        # Feature order must match training pipeline exactly:
+        # Numeric: amount, zip, lat, long, city_pop, merchant_lat, merchant_long, 
+        #          transaction_hour, transaction_dayofweek, transaction_month,
+        #          amount_log, merchant_distance, city_pop_log
+        # Categorical: category, state, gender, city, merchant
         @pandas_udf("struct<prediction int, fraud_probability double>")
         def predict_udf(
                 amount: pd.Series,
@@ -344,6 +371,9 @@ class FraudDetectionInference:
                 transaction_hour: pd.Series,
                 transaction_dayofweek: pd.Series,
                 transaction_month: pd.Series,
+                amount_log: pd.Series,
+                merchant_distance: pd.Series,
+                city_pop_log: pd.Series,
                 category: pd.Series,
                 state: pd.Series,
                 gender: pd.Series,
@@ -351,7 +381,10 @@ class FraudDetectionInference:
                 merchant: pd.Series,
         ) -> pd.DataFrame:
             """Vectorized UDF returning predictions and probabilities."""
+            # Build DataFrame with exact column order matching training pipeline
+            # This order must match xgboost_model_train.py _build_feature_pipeline
             input_df = pd.DataFrame({
+                # Numeric features (order must match training)
                 "amount": amount,
                 "zip": zip_code,
                 "lat": lat,
@@ -362,12 +395,63 @@ class FraudDetectionInference:
                 "transaction_hour": transaction_hour,
                 "transaction_dayofweek": transaction_dayofweek,
                 "transaction_month": transaction_month,
+                "amount_log": amount_log,
+                "merchant_distance": merchant_distance,
+                "city_pop_log": city_pop_log,
+                # Categorical features (order must match training)
                 "category": category,
                 "state": state,
                 "gender": gender,
                 "city": city,
                 "merchant": merchant,
             })
+            
+            # Get expected feature columns from model's preprocessor
+            # This ensures we use the exact features the model was trained with
+            model_pipeline = broadcast_model.value
+            expected_columns = None
+            
+            if hasattr(model_pipeline, 'named_steps') and 'preprocessor' in model_pipeline.named_steps:
+                preprocessor = model_pipeline.named_steps['preprocessor']
+                if hasattr(preprocessor, 'transformers_'):
+                    # Extract feature names from preprocessor transformers
+                    actual_expected_features = []
+                    for name, transformer, features in preprocessor.transformers_:
+                        if features != 'drop' and features is not None:
+                            if isinstance(features, list):
+                                actual_expected_features.extend(features)
+                            elif hasattr(features, '__iter__') and not isinstance(features, str):
+                                actual_expected_features.extend(list(features))
+                            elif isinstance(features, str):
+                                # Handle case where features is a single column name
+                                actual_expected_features.append(features)
+                    if actual_expected_features:
+                        expected_columns = actual_expected_features
+            
+            # Fallback to default feature list if preprocessor doesn't provide feature names
+            if expected_columns is None:
+                expected_columns = [
+                    # Numeric features (order must match training)
+                    "amount", "zip", "lat", "long", "city_pop", "merchant_lat", "merchant_long",
+                    "transaction_hour", "transaction_dayofweek", "transaction_month",
+                    "amount_log", "merchant_distance", "city_pop_log",
+                    # Categorical features
+                    "category", "state", "gender", "city", "merchant"
+                ]
+            
+            # Check which features are available and which are missing
+            available_columns = [col for col in expected_columns if col in input_df.columns]
+            missing_columns = [col for col in expected_columns if col not in input_df.columns]
+            
+            if missing_columns:
+                import logging
+                logger.error(f"Required columns missing from input DataFrame: {missing_columns}")
+                logger.error(f"Available columns in input_df: {list(input_df.columns)}")
+                logger.error(f"Expected columns from model: {expected_columns}")
+                raise ValueError(f"Missing required columns: {missing_columns}. Available: {list(input_df.columns)}")
+            
+            # Reorder DataFrame columns to match model's expected order
+            input_df = input_df[expected_columns]
 
             probabilities = broadcast_model.value.predict_proba(input_df)[:, 1]
             predictions = (probabilities >= threshold).astype(int)
@@ -390,6 +474,9 @@ class FraudDetectionInference:
                     "transaction_hour",
                     "transaction_dayofweek",
                     "transaction_month",
+                    "amount_log",
+                    "merchant_distance",
+                    "city_pop_log",
                     "category",
                     "state",
                     "gender",

@@ -388,6 +388,7 @@ services:
       - ./models:/app/models
       - ./config.yaml:/app/config.yaml
       - ./env:/app/.env
+      - ./inference/main.py:/app/main.py
     networks:
       - realtime-fraud-detection
 
