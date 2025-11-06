@@ -29,6 +29,7 @@ A production-ready, end-to-end machine learning system for real-time fraud detec
 - **What is MinIO**: https://github.com/minio/minio
 - **What is MLflow**: https://github.com/mlflow/mlflow
 - **What is Apache Spark**: https://github.com/apache/spark
+- **RAW Dataset:** https://www.kaggle.com/datasets/kartik2112/fraud-detection
 
 ## ✨ Features
 
@@ -178,10 +179,10 @@ docker-compose logs -f
 ### 4. Access the Services
 
 - **Airflow UI**: http://localhost:8080
-  - Default credentials: `airflow` / `airflow`
+  - Default credentials: `admin` / `admin`
 - **MLflow UI**: http://localhost:5500
 - **MinIO Console**: http://localhost:9000
-  - Default credentials: `minioadmin` / `minioadmin`
+  - Default credentials: `minio` / `minio123`
 - **Airflow Flower**: http://localhost:5555
 
 ### 5. Trigger Model Training
