@@ -8,8 +8,8 @@ A production-ready, end-to-end machine learning system for real-time fraud detec
 
 - [Useful Links](#-useful-links)
 - [Features](#-features)
-- [Architecture](#-architecture)
-- [Tech Stack](#-tech-stack)
+- [Architecture](#architecture)
+- [Tech Stack](#tech-stack)
 - [Prerequisites](#-prerequisites)
 - [Quick Start](#-quick-start)
 - [Configuration](#-configuration)
@@ -142,18 +142,12 @@ The following ports need to be available:
 ### 1. Clone the Repository
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/guoxinpony/realtime_fraud_detection.git
 cd realtime_fraud_detection
+chmod +x wait-for-it.sh
 ```
 
 ### 2. Set Up Environment Variables
-
-Create a `.env` file in the root directory:
-
-```bash
-cp .env.example .env  # If .env.example exists
-# Or create .env manually
-```
 
 Edit `.env` with your configuration:
 
@@ -432,7 +426,7 @@ If you see `libgomp.so.1: cannot open shared object file`:
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 
